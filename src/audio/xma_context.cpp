@@ -1128,8 +1128,17 @@ void XmaContext::DecodeOldFrame(XMA_CONTEXT_DATA* data) {
     stream.SetOffset(data->input_buffer_read_offset);
 
     if (data->input_buffer_read_offset > current_input_size * 8) {
-      REXAPU_ERROR("XmaContext {} old: input offset {} exceeds buffer size {}", id(),
-                   uint32_t(data->input_buffer_read_offset), current_input_size * 8);
+      // An offset exactly at the next packet's header (size + 32 bits) means the next frame
+      // starts in the next input buffer. SwapInputBuffer moves there (offset 32) and the next
+      // decode call continues from it, like every other buffer switch in this loop, so this is
+      // expected, not an error (FIFA Street 3 hits it once or twice a match). Other offsets past
+      // the end are real overruns.
+      if (data->input_buffer_read_offset == current_input_size * 8 + kBitsPerPacketHeader) {
+        REXAPU_DEBUG("XmaContext {} old: frame starts in the next input buffer", id());
+      } else {
+        REXAPU_ERROR("XmaContext {} old: input offset {} exceeds buffer size {}", id(),
+                     uint32_t(data->input_buffer_read_offset), current_input_size * 8);
+      }
       SwapInputBuffer(data);
       return;
     }
