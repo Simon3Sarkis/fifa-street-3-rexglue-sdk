@@ -17,6 +17,7 @@
 #include <string_view>
 
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/dbg.h>
 #include <rex/input/device_assignment.h>
 #include <rex/input/flags.h>
@@ -45,6 +46,10 @@ constexpr const char* kDefaultInputBackend =
 
 REXCVAR_DEFINE_STRING(input_backend, kDefaultInputBackend, "Input", "Input backend: sdl, xinput")
     .allowed({"sdl", "xinput"});
+
+REXCVAR_DEFINE_STRING(input_script, "", "Input",
+                      "Test input script: timed pad events from a text file (see input_script.h); "
+                      "relative paths resolve next to the exe. Empty = off");
 
 REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");
 // Back+Start is deliberately not the default: Steam Input uses View+Menu
@@ -323,7 +328,10 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   }
 
   if (!any) {
-    return X_ERROR_DEVICE_NOT_CONNECTED;
+    if (!script_ || !script_->HasUser(user_index)) {
+      return X_ERROR_DEVICE_NOT_CONNECTED;
+    }
+    merged = {};
   }
 
   const uint16_t menu_chord_buttons = ChordMaskFromSpec(REXCVAR_GET(menu_chord));
@@ -337,6 +345,12 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
 
   if (active_callback_ && !active_callback_()) {
     std::memset(&merged.gamepad, 0, sizeof(merged.gamepad));
+  }
+
+  // Scripted test input goes on top, after the focus gate, so background runs still play it.
+  if (script_) {
+    const uint32_t changes = script_->Apply(user_index, merged.gamepad);
+    merged.packet_number = static_cast<uint32_t>(merged.packet_number) + changes;
   }
 
   if (out_state) {
@@ -497,6 +511,15 @@ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {
   uint8_t nop_index = tool_mode ? 0 : 1;
   input->AddDriver(std::make_unique<nop::NopInputDriver>(nullptr, nop_index));
   input->SetDeviceAssignment(std::make_unique<SlotAssignment>());
+
+  const std::string script_path = REXCVAR_GET(input_script);
+  if (!tool_mode && !script_path.empty()) {
+    std::filesystem::path path(script_path);
+    if (path.is_relative()) {
+      path = rex::filesystem::GetExecutableFolder() / path;
+    }
+    input->SetScript(InputScript::Load(path));
+  }
   return input;
 }
 

@@ -17,6 +17,7 @@
 #include <rex/input/device_assignment.h>
 #include <rex/input/input.h>
 #include <rex/input/input_driver.h>
+#include <rex/input/input_script.h>
 #include <rex/input/state_merge.h>
 #include <rex/system/interfaces/input.h>
 
@@ -40,6 +41,8 @@ class InputSystem : public system::IInputSystem {
   void AttachWindow(rex::ui::Window* window);
   void SetActiveCallback(std::function<bool()> callback);
   void SetMenuChordCallback(std::function<void()> callback);
+  /// Timed test input merged into the guest pad (see input_script.h). Null turns it off.
+  void SetScript(std::unique_ptr<InputScript> script) { script_ = std::move(script); }
 
   /// Replaces any previous assignment. Call before the guest starts polling.
   void SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment);
@@ -75,6 +78,8 @@ class InputSystem : public system::IInputSystem {
   // does not renumber pad two.
   std::vector<DeviceInfo> devices_;
   std::vector<InputDriver*> device_owners_;
+
+  std::unique_ptr<InputScript> script_;
 };
 
 /// Create a default InputSystem with SDL + NOP drivers.
