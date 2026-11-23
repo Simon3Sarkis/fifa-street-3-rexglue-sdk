@@ -27,6 +27,10 @@
 #include <rex/platform/seh.h>
 #include <rex/types.h>
 
+#if defined(_WIN32)
+#include <excpt.h>  // GetExceptionCode / GetExceptionInformation used by SEH_CATCH
+#endif
+
 namespace rex {
 
 //=============================================================================
