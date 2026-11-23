@@ -932,7 +932,7 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
     case PM4_CONTEXT_UPDATE: {
       assert_true(count == 1);
       uint32_t value = reader->ReadAndSwap<uint32_t>();
-      REXGPU_INFO("GPU context update = {:08X}", value);
+      REXGPU_DEBUG("GPU context update = {:08X}", value);
       assert_true(value == 0);
       result = true;
       break;
