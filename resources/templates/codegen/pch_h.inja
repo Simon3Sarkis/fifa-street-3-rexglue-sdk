@@ -36,6 +36,7 @@
 #include <rex/perf/counter.h>
 #include <rex/thread/mutex.h>
 #include <rex/system/mmio_handler.h>
+#include <rex/platform/exceptions.h>  // SEH_TRY / SEH_CATCH for generate_exception_handlers
 
 #include <atomic>
 #include <cassert>
