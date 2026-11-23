@@ -75,9 +75,45 @@ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
                       "GPU emulation")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_STRING(input_script_snap_dir, "", "Input",
+                      "Folder for input-script `snap` captures; empty = 'snaps' next to the exe");
+
 namespace rex {
 
 namespace {
+
+// 24-bit bottom-up BMP from the presenter's R8G8B8X8 capture (no image library needed).
+bool WriteBmp(const std::filesystem::path& path, const ui::RawImage& image) {
+  const uint32_t w = image.width, h = image.height;
+  const uint32_t row = (w * 3 + 3) & ~3u;
+  const uint32_t data_size = row * h;
+  uint8_t header[54] = {'B', 'M'};
+  auto put32 = [&](int at, uint32_t v) { std::memcpy(header + at, &v, 4); };
+  put32(2, 54 + data_size);
+  put32(10, 54);
+  put32(14, 40);
+  put32(18, w);
+  put32(22, h);
+  header[26] = 1;
+  header[28] = 24;
+  put32(34, data_size);
+  std::ofstream out(path, std::ios::binary);
+  if (!out) {
+    return false;
+  }
+  out.write(reinterpret_cast<const char*>(header), sizeof(header));
+  std::vector<uint8_t> line(row, 0);
+  for (uint32_t y = 0; y < h; ++y) {
+    const uint8_t* src = image.data.data() + size_t(h - 1 - y) * image.stride;
+    for (uint32_t x = 0; x < w; ++x) {
+      line[x * 3 + 0] = src[x * 4 + 2];
+      line[x * 3 + 1] = src[x * 4 + 1];
+      line[x * 3 + 2] = src[x * 4 + 0];
+    }
+    out.write(reinterpret_cast<const char*>(line.data()), row);
+  }
+  return bool(out);
+}
 
 constexpr bool kBlockShaderStorageStartup =
 #if REX_PLATFORM_WIN32
@@ -582,6 +618,34 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
         });
       }
     }
+  }
+
+  // Input-script `snap`: save the game's own output frame (not a screen copy, so other windows
+  // can't cover it). Runs on the guest thread that polls input; CaptureGuestOutput is thread-safe.
+  if (auto* input_sys = static_cast<rex::input::InputSystem*>(runtime_->input_system())) {
+    input_sys->SetScriptSnapCallback([this](const std::string& name) {
+      // The graphics system belongs to the runtime by now (config_.graphics was moved into it).
+      auto* graphics = runtime_ ? runtime_->graphics_system() : nullptr;
+      auto* presenter = graphics ? graphics->presenter() : nullptr;
+      ui::RawImage image;
+      if (!presenter || !presenter->CaptureGuestOutput(image)) {
+        REXLOG_WARN("input_script: snap {}: no guest output to capture", name);
+        return;
+      }
+      std::filesystem::path dir = REXCVAR_GET(input_script_snap_dir);
+      if (dir.empty()) {
+        dir = rex::filesystem::GetExecutableFolder() / "snaps";
+      }
+      std::error_code ec;
+      std::filesystem::create_directories(dir, ec);
+      const auto file = dir / (name + ".bmp");
+      if (WriteBmp(file, image)) {
+        REXLOG_INFO("input_script: snap {} -> {} ({}x{})", name, file.string(), image.width,
+                    image.height);
+      } else {
+        REXLOG_WARN("input_script: snap {}: cannot write {}", name, file.string());
+      }
+    });
   }
 
   std::string xex_image = "game:\\default.xex";

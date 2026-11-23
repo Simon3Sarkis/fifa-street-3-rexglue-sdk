@@ -43,6 +43,10 @@ class InputSystem : public system::IInputSystem {
   void SetMenuChordCallback(std::function<void()> callback);
   /// Timed test input merged into the guest pad (see input_script.h). Null turns it off.
   void SetScript(std::unique_ptr<InputScript> script) { script_ = std::move(script); }
+  /// Hook for the script's `snap` command (no-op without a script).
+  void SetScriptSnapCallback(InputScript::SnapCallback callback) {
+    if (script_) script_->SetSnapCallback(std::move(callback));
+  }
 
   /// Replaces any previous assignment. Call before the guest starts polling.
   void SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment);

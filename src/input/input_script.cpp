@@ -57,6 +57,9 @@ bool ParseButtons(const std::string& spec, uint16_t& out) {
   return out != 0;
 }
 
+// Queued after the tick's snaps so a quit never cuts off a capture.
+const std::string kQuitMarker = "quit";
+
 int16_t AxisValue(float v) {
   v = std::clamp(v, -1.0f, 1.0f);
   return static_cast<int16_t>(std::lround(v * 32767.0f));
@@ -169,6 +172,12 @@ std::unique_ptr<InputScript> InputScript::Load(const std::filesystem::path& path
         continue;
       }
       ev.end_ms = time;
+    } else if (cmd == "SNAP") {
+      ev.kind = Kind::kSnap;
+      if (!(ss >> ev.text)) {
+        ev.text = "snap_" + std::to_string(time);
+      }
+      ev.end_ms = time;
     } else if (cmd == "QUIT") {
       ev.kind = Kind::kQuit;
       ev.end_ms = time;
@@ -201,6 +210,25 @@ bool InputScript::HasUser(uint32_t user_index) const {
 }
 
 uint32_t InputScript::Apply(uint32_t user_index, X_INPUT_GAMEPAD& pad) {
+  std::vector<std::string> snaps;
+  const uint32_t changes = ApplyLocked(user_index, pad, snaps);
+  // Captures read back a GPU image; do them without holding the script lock.
+  for (const auto& name : snaps) {
+    if (name == kQuitMarker) {
+      rex::FlushLogging();
+      std::_Exit(0);
+    }
+    if (snap_callback_) {
+      snap_callback_(name);
+    } else {
+      REXSYS_WARN("input_script: snap {} skipped: no capture hook installed", name);
+    }
+  }
+  return changes;
+}
+
+uint32_t InputScript::ApplyLocked(uint32_t user_index, X_INPUT_GAMEPAD& pad,
+                                  std::vector<std::string>& snaps) {
   std::lock_guard<std::mutex> lock(mutex_);
   const int64_t now = NowMs();
   uint16_t buttons = 0;
@@ -223,10 +251,14 @@ uint32_t InputScript::Apply(uint32_t user_index, X_INPUT_GAMEPAD& pad) {
                       ev.value, ok ? "" : " (FAILED: unknown setting or bad value)");
           break;
         }
+        case Kind::kSnap:
+          REXSYS_INFO("input_script: t={} ms (line {}): snap {}", now, ev.line, ev.text);
+          snaps.push_back(ev.text);
+          break;
         case Kind::kQuit:
           REXSYS_INFO("input_script: t={} ms (line {}): quit", now, ev.line);
-          rex::FlushLogging();
-          std::_Exit(0);
+          snaps.push_back(kQuitMarker);  // after any snap of the same tick
+          break;
         default:
           REXSYS_INFO("input_script: t={} ms (line {}): user {} {} for {} ms", now, ev.line,
                       ev.user,

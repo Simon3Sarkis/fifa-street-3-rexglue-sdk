@@ -19,6 +19,8 @@
  *   trigger L|R v ms      trigger at v in 0..1 for ms
  *   user N                following events go to guest user N (0-3, default 0)
  *   log text...           writes "input_script: text" to the log at that time
+ *   snap name             saves the game's output frame as <input_script_snap_dir>/<name>.bmp
+ *                         (from the presenter, so other windows can't cover it)
  *   set name value        changes a setting at that time (rex::cvar::SetFlagByName), e.g. to turn
  *                         a debug log on for the frames that matter
  *   quit                  flushes the log and exits the process (exit code 0)
@@ -27,6 +29,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -48,8 +51,12 @@ class InputScript {
   /// True if any event targets user_index (a scripted user counts as connected).
   bool HasUser(uint32_t user_index) const;
 
+  /// Called (outside the script's lock) for each `snap` event, with its name. Set by the app.
+  using SnapCallback = std::function<void(const std::string& name)>;
+  void SetSnapCallback(SnapCallback callback) { snap_callback_ = std::move(callback); }
+
  private:
-  enum class Kind { kButtons, kStick, kTrigger, kLog, kSet, kQuit };
+  enum class Kind { kButtons, kStick, kTrigger, kLog, kSet, kSnap, kQuit };
   struct Event {
     int64_t start_ms = 0;
     int64_t end_ms = 0;
@@ -65,9 +72,11 @@ class InputScript {
   };
 
   InputScript() = default;
+  uint32_t ApplyLocked(uint32_t user_index, X_INPUT_GAMEPAD& pad, std::vector<std::string>& snaps);
   int64_t NowMs() const;
 
   std::vector<Event> events_;
+  SnapCallback snap_callback_;
   int64_t epoch_ms_ = 0;
   std::mutex mutex_;
   struct UserState {
