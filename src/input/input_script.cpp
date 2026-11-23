@@ -12,6 +12,7 @@
 #include <fstream>
 #include <sstream>
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
 
 namespace rex::input {
@@ -161,6 +162,13 @@ std::unique_ptr<InputScript> InputScript::Load(const std::filesystem::path& path
       std::getline(ss, ev.text);
       ev.text.erase(0, ev.text.find_first_not_of(' '));
       ev.end_ms = time;
+    } else if (cmd == "SET") {
+      ev.kind = Kind::kSet;
+      if (!(ss >> ev.text >> ev.value)) {
+        bad("set needs a name and a value");
+        continue;
+      }
+      ev.end_ms = time;
     } else if (cmd == "QUIT") {
       ev.kind = Kind::kQuit;
       ev.end_ms = time;
@@ -209,6 +217,12 @@ uint32_t InputScript::Apply(uint32_t user_index, X_INPUT_GAMEPAD& pad) {
         case Kind::kLog:
           REXSYS_INFO("input_script: t={} ms (line {}): {}", now, ev.line, ev.text);
           break;
+        case Kind::kSet: {
+          const bool ok = rex::cvar::SetFlagByName(ev.text, ev.value);
+          REXSYS_INFO("input_script: t={} ms (line {}): set {} = {}{}", now, ev.line, ev.text,
+                      ev.value, ok ? "" : " (FAILED: unknown setting or bad value)");
+          break;
+        }
         case Kind::kQuit:
           REXSYS_INFO("input_script: t={} ms (line {}): quit", now, ev.line);
           rex::FlushLogging();

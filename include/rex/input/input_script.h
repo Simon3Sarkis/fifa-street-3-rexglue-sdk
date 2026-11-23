@@ -19,6 +19,8 @@
  *   trigger L|R v ms      trigger at v in 0..1 for ms
  *   user N                following events go to guest user N (0-3, default 0)
  *   log text...           writes "input_script: text" to the log at that time
+ *   set name value        changes a setting at that time (rex::cvar::SetFlagByName), e.g. to turn
+ *                         a debug log on for the frames that matter
  *   quit                  flushes the log and exits the process (exit code 0)
  */
 #pragma once
@@ -47,7 +49,7 @@ class InputScript {
   bool HasUser(uint32_t user_index) const;
 
  private:
-  enum class Kind { kButtons, kStick, kTrigger, kLog, kQuit };
+  enum class Kind { kButtons, kStick, kTrigger, kLog, kSet, kQuit };
   struct Event {
     int64_t start_ms = 0;
     int64_t end_ms = 0;
@@ -57,6 +59,7 @@ class InputScript {
     bool right = false;
     float x = 0, y = 0;
     std::string text;
+    std::string value;
     int line = 0;
     bool started = false;
   };
