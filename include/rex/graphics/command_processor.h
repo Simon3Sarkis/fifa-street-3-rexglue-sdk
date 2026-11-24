@@ -77,6 +77,32 @@ enum class GammaRampType {
 
 class CommandProcessor {
  public:
+  // Blocking waits on the command processor thread, accumulated for log_frame_stats (microseconds
+  // and counts since the last stats line). Written from the CP thread only.
+  enum class WaitStat : uint32_t {
+    kWaitRegMem, kIdleNoCommands, kGpuFence, kSwap, kSubmit,
+    kSubmitReplay, kSubmitQueueLock, kSubmitCall, kCount
+  };
+  // Times a scope into AddWaitStat.
+  struct ScopedWaitStat {
+    explicit ScopedWaitStat(WaitStat k) : kind(k), start(std::chrono::steady_clock::now()) {}
+    ~ScopedWaitStat() {
+      AddWaitStat(kind, uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now() - start).count()));
+    }
+    WaitStat kind;
+    std::chrono::steady_clock::time_point start;
+  };
+  static void AddWaitStat(WaitStat kind, uint64_t us) {
+    wait_stat_us_[uint32_t(kind)] += us;
+    ++wait_stat_n_[uint32_t(kind)];
+  }
+  static inline uint64_t wait_stat_us_[uint32_t(WaitStat::kCount)] = {};
+  static inline uint64_t wait_stat_n_[uint32_t(WaitStat::kCount)] = {};
+  // WAIT_REG_MEM spin-then-sleep state (CP thread only).
+  bool wait_reg_mem_waiting_ = false;
+  std::chrono::steady_clock::time_point wait_reg_mem_start_;
+
   enum class SwapPostEffect {
     kNone,
     kFxaa,

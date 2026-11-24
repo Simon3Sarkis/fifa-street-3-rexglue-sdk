@@ -50,6 +50,11 @@
 REXCVAR_DEFINE_BOOL(present_render_pass_clear, true, "UI/Presenter",
                     "Clear render pass during presentation");
 
+REXCVAR_DEFINE_BOOL(vulkan_present_separate_queue, true, "UI/Vulkan",
+                    "Present from a queue the GPU emulation does not submit to (a second graphics "
+                    "queue, or another presentation-capable family), so a present that blocks for a "
+                    "display refresh doesn't hold up guest GPU work")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_immediate, true, "UI/Vulkan",
                     "Allow immediate present mode (no vsync)");
 
@@ -1267,12 +1272,33 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
   uint32_t queue_family_index_graphics_compute = vulkan_device->queue_family_graphics_compute();
   const VulkanDevice::QueueFamily& queue_family_graphics_compute =
       queue_families[queue_family_index_graphics_compute];
-  if (queue_family_graphics_compute.may_support_presentation &&
+  const bool graphics_can_present =
+      queue_family_graphics_compute.may_support_presentation &&
       !queue_family_graphics_compute.queues.empty() &&
       ifn.vkGetPhysicalDeviceSurfaceSupportKHR(physical_device, queue_family_index_graphics_compute,
                                                surface,
                                                &queue_family_present_supported) == VK_SUCCESS &&
-      queue_family_present_supported) {
+      queue_family_present_supported;
+  // Present from a queue the GPU emulation doesn't submit to (see PresentQueueIndex): a second
+  // graphics queue if the device created one, else another family that can present (concurrent
+  // image sharing), else the shared graphics queue.
+  if (REXCVAR_GET(vulkan_present_separate_queue) && graphics_can_present &&
+      queue_family_graphics_compute.queues.size() < 2) {
+    for (uint32_t i = 0; i < uint32_t(queue_families.size()); ++i) {
+      const VulkanDevice::QueueFamily& queue_family = queue_families[i];
+      if (i != queue_family_index_graphics_compute && !queue_family.queues.empty() &&
+          queue_family.may_support_presentation &&
+          ifn.vkGetPhysicalDeviceSurfaceSupportKHR(physical_device, i, surface,
+                                                   &queue_family_present_supported) == VK_SUCCESS &&
+          queue_family_present_supported) {
+        queue_family_index_present = i;
+        break;
+      }
+    }
+  }
+  if (queue_family_index_present != UINT32_MAX) {
+    // Chosen above: a separate family.
+  } else if (graphics_can_present) {
     queue_family_index_present = queue_family_index_graphics_compute;
   } else {
     for (uint32_t i = 0; i < uint32_t(queue_families.size()); ++i) {
@@ -1519,10 +1545,11 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
   }
   REXLOG_INFO(
       "VulkanPresenter: Created {}x{} swapchain with format {}, color space "
-      "{}, presentation mode {}",
+      "{}, presentation mode {}, presenting on queue family {} (graphics {}), {} queue(s) there",
       swapchain_create_info.imageExtent.width, swapchain_create_info.imageExtent.height,
       uint32_t(swapchain_create_info.imageFormat), uint32_t(swapchain_create_info.imageColorSpace),
-      uint32_t(swapchain_create_info.presentMode));
+      uint32_t(swapchain_create_info.presentMode), queue_family_index_present,
+      queue_family_index_graphics_compute, queue_families[queue_family_index_present].queues.size());
 
   present_queue_family_out = queue_family_index_present;
   image_format_out = swapchain_create_info.imageFormat;
@@ -1649,6 +1676,14 @@ bool VulkanPresenter::GuestOutputImage::Initialize() {
   }
 
   return true;
+}
+
+uint32_t VulkanPresenter::PresentQueueIndex(uint32_t present_queue_family) const {
+  if (!REXCVAR_GET(vulkan_present_separate_queue) ||
+      present_queue_family != vulkan_device_->queue_family_graphics_compute()) {
+    return 0;
+  }
+  return vulkan_device_->queue_families()[present_queue_family].queues.size() >= 2 ? 1 : 0;
 }
 
 Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_drawers) {
@@ -2383,8 +2418,8 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
   VkResult present_result;
   const auto timing_present_start = std::chrono::steady_clock::now();
   {
-    const VulkanDevice::Queue::Acquisition queue_acquisition =
-        vulkan_device_->AcquireQueue(paint_context_.present_queue_family, 0);
+    const VulkanDevice::Queue::Acquisition queue_acquisition = vulkan_device_->AcquireQueue(
+        paint_context_.present_queue_family, PresentQueueIndex(paint_context_.present_queue_family));
     present_result = dfn.vkQueuePresentKHR(queue_acquisition.queue(), &present_info);
   }
   const auto timing_present_end = std::chrono::steady_clock::now();

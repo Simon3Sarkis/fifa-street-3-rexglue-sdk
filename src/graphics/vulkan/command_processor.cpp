@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <optional>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -6143,6 +6144,9 @@ void VulkanCommandProcessor::BeginGpuTimestampFrame() {
   frame.bucket_vs.clear();
   frame.bucket_ps.clear();
   frame.bucket_vertices.clear();
+  // Latched for the whole frame, so a traced frame is per-draw from its first draw to its last.
+  frame.per_draw = REXCVAR_GET(vulkan_gpu_timestamp_per_draw) &&
+                   REXCVAR_GET(vulkan_gpu_timestamp_trace_frames) > 0;
 
   // The frame-level start/end pair is measured only while a visible overlay or
   // explicit timestamp diagnostic needs it.
@@ -6297,7 +6301,10 @@ void VulkanCommandProcessor::ProcessGpuTimestampResults() {
 
     // Attribution audit trace - logs every bucket interval of the frame.
     int32_t trace_remaining = REXCVAR_GET(vulkan_gpu_timestamp_trace_frames);
-    bool trace_this_frame = trace_remaining > 0 && frame_span_us > 0;
+    // A per-draw trace skips frames recorded before per-draw took effect (still in flight when
+    // the cvars were set), so they don't use up the frame count with merged intervals.
+    bool trace_this_frame = trace_remaining > 0 && frame_span_us > 0 &&
+                            (frame.per_draw || !REXCVAR_GET(vulkan_gpu_timestamp_per_draw));
     uint64_t trace_frame_start_ticks = 0;
     if (trace_this_frame) {
       REXCVAR_SET(vulkan_gpu_timestamp_trace_frames, trace_remaining - 1);
@@ -6455,8 +6462,6 @@ void VulkanCommandProcessor::ProcessGpuTimestampResults() {
 uint32_t VulkanCommandProcessor::BeginGpuTimestampedDraw(rex::perf::DrawBucket bucket,
                                                          uint64_t vs_hash, uint64_t ps_hash,
                                                          uint32_t vertices) {
-  const bool per_draw = REXCVAR_GET(vulkan_gpu_timestamp_per_draw) &&
-                        REXCVAR_GET(vulkan_gpu_timestamp_trace_frames) > 0;
   if (!gpu_timestamp_resources_available_ || gpu_timestamp_query_pool_ == VK_NULL_HANDLE ||
       !gpu_timestamp_draws_enabled_ || !frame_open_) {
     return UINT32_MAX;
@@ -6466,6 +6471,7 @@ uint32_t VulkanCommandProcessor::BeginGpuTimestampedDraw(rex::perf::DrawBucket b
   if (frame.frame != frame_current_) {
     return UINT32_MAX;
   }
+  const bool per_draw = frame.per_draw;
   if (frame.active_bucket_valid && frame.active_bucket == bucket && !per_draw) {
     return UINT32_MAX;
   }
@@ -6759,6 +6765,10 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
       wait_result =
           dfn.vkWaitForFences(device, uint32_t(await_submission - submission_completed_),
                               submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);
+      AddWaitStat(WaitStat::kGpuFence,
+                  uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - wait_start)
+                               .count()));
       if (ui::Presenter* wait_presenter = graphics_system_->presenter()) {
         wait_presenter->AddGuestFrameWaitMicroseconds(uint64_t(
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
@@ -7080,6 +7090,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
 }
 
 bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+  ScopedWaitStat submit_stat(WaitStat::kSubmit);
   rex::perf::ScopedCounterTimer end_submission_timer(
       rex::perf::CounterId::kCpuD3D12EndSubmissionUs);
 
@@ -7256,7 +7267,10 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
         REXGPU_ERROR("Failed to begin a Vulkan command buffer");
         return false;
       }
-      deferred_command_buffer_.Execute(command_buffer.buffer);
+      {
+        ScopedWaitStat replay_stat(WaitStat::kSubmitReplay);
+        deferred_command_buffer_.Execute(command_buffer.buffer);
+      }
       if (is_closing_frame) {
         ResolveGpuTimestampFrame(command_buffer.buffer);
       }
@@ -7296,8 +7310,11 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
     {
       rex::perf::ScopedCounterTimer execute_command_lists_timer(
           rex::perf::CounterId::kCpuD3D12ExecuteCommandListsUs);
+      std::optional<ScopedWaitStat> lock_stat(std::in_place, WaitStat::kSubmitQueueLock);
       ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
           vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
+      lock_stat.reset();
+      ScopedWaitStat call_stat(WaitStat::kSubmitCall);
       submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence);
     }
     if (submit_result != VK_SUCCESS) {

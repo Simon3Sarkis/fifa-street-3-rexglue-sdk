@@ -836,6 +836,8 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint32_t frame_end_query = UINT32_MAX;
     bool pending = false;
     bool active_bucket_valid = false;
+    // vulkan_gpu_timestamp_per_draw as it was when the frame began.
+    bool per_draw = false;
     rex::perf::DrawBucket active_bucket = rex::perf::DrawBucket::kMainColorDepth;
     uint32_t active_bucket_index = UINT32_MAX;
     std::vector<rex::perf::DrawBucket> buckets;

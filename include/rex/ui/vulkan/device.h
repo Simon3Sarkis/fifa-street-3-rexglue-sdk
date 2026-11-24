@@ -272,6 +272,8 @@ class VulkanDevice {
   struct QueueFamily {
     VkQueueFlags queue_flags = 0;
     bool may_support_presentation = false;
+    // How many queues the family offers (VkQueueFamilyProperties::queueCount).
+    uint32_t queue_count_available = 0;
     std::vector<std::unique_ptr<Queue>> queues;
   };
 

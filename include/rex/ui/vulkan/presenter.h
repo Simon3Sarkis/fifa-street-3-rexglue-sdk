@@ -146,6 +146,9 @@ class VulkanPresenter final : public Presenter {
                               std::function<bool(GuestOutputRefreshContext& context)> refresher,
                               bool& is_8bpc_out_ref) override;
 
+  // Queue index to present on in present_queue_family: 1 when it is the graphics family and the
+  // device created a second queue there (the GPU emulation submits to queue 0), else 0.
+  uint32_t PresentQueueIndex(uint32_t present_queue_family) const;
   PaintResult PaintAndPresentImpl(bool execute_ui_drawers) override;
 
  private:

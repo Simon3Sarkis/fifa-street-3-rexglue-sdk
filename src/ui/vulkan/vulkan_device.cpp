@@ -407,6 +407,7 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     const VkQueueFamilyProperties& queue_family_properties = queue_families[queue_family_index];
 
     const VkQueueFlags queue_unsupported_flags = ~queue_family_properties.queueFlags;
+    queue_family.queue_count_available = queue_family_properties.queueCount;
 
     if (!(queue_unsupported_flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT))) {
       first_queue_family_graphics_compute =
@@ -488,6 +489,16 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
 
   device->queue_families_[device->queue_family_graphics_compute_].queues.resize(std::max(
       size_t(1), device->queue_families_[device->queue_family_graphics_compute_].queues.size()));
+  // A second graphics queue for presentation when the family has one: vkQueuePresentKHR can
+  // block for a whole display refresh (windowed, composited), and with one queue that holds up
+  // the GPU emulation's submissions (measured: ~20 ms a frame of queue-lock waits on NVIDIA).
+  {
+    QueueFamily& graphics_family = device->queue_families_[device->queue_family_graphics_compute_];
+    if (with_swapchain && graphics_family.may_support_presentation &&
+        graphics_family.queue_count_available >= 2) {
+      graphics_family.queues.resize(std::max(size_t(2), graphics_family.queues.size()));
+    }
+  }
   if (device->queue_family_sparse_binding_ != UINT32_MAX) {
     device->queue_families_[device->queue_family_sparse_binding_].queues.resize(std::max(
         size_t(1), device->queue_families_[device->queue_family_sparse_binding_].queues.size()));

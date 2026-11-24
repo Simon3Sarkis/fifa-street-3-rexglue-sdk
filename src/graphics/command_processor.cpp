@@ -38,6 +38,10 @@
 
 REXCVAR_DEFINE_BOOL(vsync, false, "GPU", "Enable vertical sync");
 
+REXCVAR_DEFINE_INT32(wait_reg_mem_spin_us, 2000, "GPU",
+                     "WAIT_REG_MEM: poll with yields for this long before sleeping between polls "
+                     "(0 = always sleep, the old behaviour)");
+
 REXCVAR_DEFINE_BOOL(log_frame_stats, false, "Perf",
                     "Every 2 s, log the guest frame rate measured at guest swaps: average and worst "
                     "frame time, frames over 33.3 ms, and the frontbuffer size. Cheap; for "
@@ -285,6 +289,7 @@ void CommandProcessor::WorkerThreadMain() {
       // We spin here waiting for new ones, as the overhead of waiting on our
       // event is too high.
       PrepareForWait();
+      const auto idle_start = std::chrono::steady_clock::now();
       uint32_t loop_count = 0;
       do {
         // If we spin around too much, revert to a "low-power" state.
@@ -299,6 +304,10 @@ void CommandProcessor::WorkerThreadMain() {
         write_ptr_index = write_ptr_index_.load();
       } while (worker_running_ && pending_fns_.empty() &&
                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
+      AddWaitStat(WaitStat::kIdleNoCommands,
+                  uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - idle_start)
+                               .count()));
       ReturnFromWait();
       if (!worker_running_ || !pending_fns_.empty()) {
         continue;
@@ -1051,9 +1060,22 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
     }
     if (now - window_start >= 2 * freq && frames) {
       const double seconds = double(now - window_start) / double(freq);
-      REXGPU_INFO("[frame stats] {:.1f} fps, avg {:.2f} ms, worst {:.1f} ms, >33ms {}, frontbuffer {}x{}",
+      REXGPU_INFO("[frame stats] {:.1f} fps, avg {:.2f} ms, worst {:.1f} ms, >33ms {}, frontbuffer {}x{}; "
+                  "CP waits per frame: wait_reg_mem {:.2f} ms ({:.1f}x), no commands {:.2f} ms "
+                  "({:.1f}x), gpu fence {:.2f} ms ({:.1f}x), swap {:.2f} ms, submit {:.2f} ms ({:.1f}x) "
+                  "[replay {:.2f}, queue lock {:.2f}, vkQueueSubmit {:.2f}]",
                   frames / seconds, sum_us / 1000.0 / frames, worst_us / 1000.0, slow,
-                  frontbuffer_width, frontbuffer_height);
+                  frontbuffer_width, frontbuffer_height,
+                  wait_stat_us_[0] / 1000.0 / frames, double(wait_stat_n_[0]) / frames,
+                  wait_stat_us_[1] / 1000.0 / frames, double(wait_stat_n_[1]) / frames,
+                  wait_stat_us_[2] / 1000.0 / frames, double(wait_stat_n_[2]) / frames,
+                  wait_stat_us_[3] / 1000.0 / frames, wait_stat_us_[4] / 1000.0 / frames,
+                  double(wait_stat_n_[4]) / frames, wait_stat_us_[5] / 1000.0 / frames,
+                  wait_stat_us_[6] / 1000.0 / frames, wait_stat_us_[7] / 1000.0 / frames);
+      for (uint32_t i = 0; i < uint32_t(WaitStat::kCount); ++i) {
+        wait_stat_us_[i] = 0;
+        wait_stat_n_[i] = 0;
+      }
       window_start = now;
       frames = slow = 0;
       sum_us = worst_us = 0;
@@ -1062,6 +1084,7 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
 
   {
     PROFILE_SCOPE_COUNTER(kCpuSwapUs);
+    ScopedWaitStat swap_stat(WaitStat::kSwap);
     IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
   }
 
@@ -1227,7 +1250,21 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
       // Wait. Attributed separately so time spent blocked on guest-side
       // progress isn't read as command processing cost.
       PROFILE_SCOPE_COUNTER(kCpuGuestWaitUs);
-      if (wait >= 0x100) {
+      const auto wait_start = std::chrono::steady_clock::now();
+      if (!wait_reg_mem_waiting_) {
+        wait_reg_mem_waiting_ = true;
+        wait_reg_mem_start_ = wait_start;
+        // Counted once per wait; the polls below add only their time.
+        ++wait_stat_n_[uint32_t(WaitStat::kWaitRegMem)];
+      }
+      // The real CP polls continuously and continues within microseconds of the value changing.
+      // Sleeping (>= 1 ms per poll) left the GPU idle ~1.35 ms per wait; FIFA Street 3 makes ~5
+      // such waits a frame. Poll with yields for wait_reg_mem_spin_us, then fall back to sleeping
+      // so long waits don't burn a core.
+      const bool spin =
+          std::chrono::duration_cast<std::chrono::microseconds>(wait_start - wait_reg_mem_start_)
+              .count() < REXCVAR_GET(wait_reg_mem_spin_us);
+      if (wait >= 0x100 && !spin) {
         PrepareForWait();
         if (!REXCVAR_GET(vsync)) {
           // User wants it fast and dangerous.
@@ -1245,8 +1282,13 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
       } else {
         rex::thread::MaybeYield();
       }
+      wait_stat_us_[uint32_t(WaitStat::kWaitRegMem)] +=
+          uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now() - wait_start)
+                       .count());
     }
   } while (!matched);
+  wait_reg_mem_waiting_ = false;
 
   return true;
 }
