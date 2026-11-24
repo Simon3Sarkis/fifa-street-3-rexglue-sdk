@@ -39,12 +39,17 @@
 #include <rex/stream.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
+#include <rex/thread.h>
 
 REXCVAR_DEFINE_BOOL(vsync, false, "GPU", "Enable vertical sync");
 
 REXCVAR_DEFINE_INT32(wait_reg_mem_spin_us, 2000, "GPU",
                      "WAIT_REG_MEM: poll with yields for this long before sleeping between polls "
                      "(0 = always sleep, the old behaviour)");
+REXCVAR_DEFINE_INT32(wait_reg_mem_spin_wine_us, 0, "GPU",
+                     "wait_reg_mem_spin_us to use when running under Wine / Proton (0 = the same). "
+                     "On the Steam Deck a long spin keeps the CPU clock up; on native Windows with "
+                     "NVIDIA a long spin made vkQueueSubmit block (40 FPS instead of 60)");
 REXCVAR_DEFINE_BOOL(wait_reg_mem_spin_pause, false, "GPU",
                     "WAIT_REG_MEM spin: poll with CPU pause hints instead of OS yields (no kernel "
                     "round trip per poll, less power on the spinning core)")
@@ -1269,9 +1274,14 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
       // Sleeping (>= 1 ms per poll) left the GPU idle ~1.35 ms per wait; FIFA Street 3 makes ~5
       // such waits a frame. Poll with yields for wait_reg_mem_spin_us, then fall back to sleeping
       // so long waits don't burn a core.
+      static const bool under_wine = rex::thread::IsRunningUnderWine();
+      const int32_t spin_limit_us =
+          (under_wine && REXCVAR_GET(wait_reg_mem_spin_wine_us) > 0)
+              ? REXCVAR_GET(wait_reg_mem_spin_wine_us)
+              : REXCVAR_GET(wait_reg_mem_spin_us);
       const bool spin =
           std::chrono::duration_cast<std::chrono::microseconds>(wait_start - wait_reg_mem_start_)
-              .count() < REXCVAR_GET(wait_reg_mem_spin_us);
+              .count() < spin_limit_us;
       if (wait >= 0x100 && !spin) {
         PrepareForWait();
         if (!REXCVAR_GET(vsync)) {
