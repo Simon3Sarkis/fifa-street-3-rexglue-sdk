@@ -314,6 +314,10 @@ class XThread : public XObject {
   static bool IsInThread(XThread* other);
   static bool IsInThread();
   static XThread* GetCurrentThread();
+  // debug_log_guest_yields: count a host yield done on the guest's behalf (site: 0 NtYieldExecution,
+  // 1 zero-interval KeDelayExecutionThread, 2 timed-out wait, 3 contended guest spinlock), logged
+  // with per-thread totals every 2 s.
+  static void CountGuestYield(int site);
   static uint32_t GetCurrentThreadHandle();
   static uint32_t GetCurrentThreadId();
 

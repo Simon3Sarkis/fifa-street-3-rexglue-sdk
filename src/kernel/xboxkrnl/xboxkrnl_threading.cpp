@@ -390,6 +390,7 @@ u32 KeDelayExecutionThread_entry(u32 processor_mode, u32 alertable, mapped_u64 i
 }
 
 u32 NtYieldExecution_entry() {
+  XThread::CountGuestYield(0);
   rex::thread::MaybeYield();
   return X_STATUS_SUCCESS;
 }
@@ -970,6 +971,7 @@ uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock, bool change_i
   const uint32_t self = rex::byte_swap(pcr_addr);
   assert_true(lock->prcb_of_owner.value != self);  // self-deadlock detection
   while (!rex::thread::atomic_cas(0u, self, &lock->prcb_of_owner.value)) {
+    XThread::CountGuestYield(3);
     rex::thread::MaybeYield();
   }
   return old_irql;

@@ -223,6 +223,7 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
       // Or X_STATUS_ALERTED?
       return X_STATUS_USER_APC;
     case rex::thread::WaitResult::kTimeout:
+      XThread::CountGuestYield(2);
       rex::thread::MaybeYield();
       return X_STATUS_TIMEOUT;
     default:
@@ -250,6 +251,7 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, ui
       // Or X_STATUS_ALERTED?
       return X_STATUS_USER_APC;
     case rex::thread::WaitResult::kTimeout:
+      XThread::CountGuestYield(2);
       rex::thread::MaybeYield();
       return X_STATUS_TIMEOUT;
     default:
@@ -286,6 +288,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
         // Or X_STATUS_ALERTED?
         return X_STATUS_USER_APC;
       case rex::thread::WaitResult::kTimeout:
+        XThread::CountGuestYield(2);
         rex::thread::MaybeYield();
         return X_STATUS_TIMEOUT;
       default:
@@ -309,6 +312,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
         // Or X_STATUS_ALERTED?
         return X_STATUS_USER_APC;
       case rex::thread::WaitResult::kTimeout:
+        XThread::CountGuestYield(2);
         rex::thread::MaybeYield();
         return X_STATUS_TIMEOUT;
       default:

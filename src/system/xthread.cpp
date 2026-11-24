@@ -10,8 +10,13 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cstring>
+#include <map>
+#include <mutex>
+#include <string>
 
 #include <fmt/format.h>
 
@@ -40,6 +45,10 @@
 REXCVAR_DEFINE_BOOL(ignore_thread_priorities, true, "Kernel",
                     "Ignores game-specified thread priorities");
 
+REXCVAR_DEFINE_BOOL(debug_log_guest_yields, false, "Kernel",
+                    "Every 2 s, log per guest thread how often the host yielded on its behalf "
+                    "(NtYieldExecution, Sleep(0), timed-out waits, contended spinlocks)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(ignore_thread_affinities, true, "Kernel",
                     "Ignores game-specified thread affinities");
 
@@ -1002,6 +1011,29 @@ uint32_t XThread::SelfSuspend() {
 }
 #endif
 
+void XThread::CountGuestYield(int site) {
+  if (!REXCVAR_GET(debug_log_guest_yields)) {
+    return;
+  }
+  static std::mutex mutex;
+  static std::map<std::string, std::array<uint64_t, 4>> counts;
+  static auto last = std::chrono::steady_clock::now();
+  XThread* thread = XThread::GetCurrentThread();
+  std::lock_guard<std::mutex> lock(mutex);
+  counts[thread ? thread->thread_name_ : std::string("host")][size_t(site) & 3]++;
+  auto now = std::chrono::steady_clock::now();
+  if (now - last >= std::chrono::seconds(2)) {
+    std::string line;
+    for (const auto& [name, c] : counts) {
+      line += fmt::format(" | {}: yield {} sleep0 {} wait-timeout {} spinlock {}", name, c[0], c[1],
+                          c[2], c[3]);
+    }
+    REXKRNL_INFO("[guest yields / 2 s]{}", line);
+    counts.clear();
+    last = now;
+  }
+}
+
 X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t interval) {
   int64_t timeout_ticks = interval;
   uint32_t timeout_ms;
@@ -1033,6 +1065,7 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t in
       if (priority_ <= rex::thread::ThreadPriority::kBelowNormal) {
         rex::thread::Sleep(std::chrono::microseconds(100));
       } else {
+        CountGuestYield(1);
         rex::thread::MaybeYield();
       }
     } else {
