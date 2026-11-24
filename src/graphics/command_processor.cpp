@@ -38,6 +38,11 @@
 
 REXCVAR_DEFINE_BOOL(vsync, false, "GPU", "Enable vertical sync");
 
+REXCVAR_DEFINE_BOOL(log_frame_stats, false, "Perf",
+                    "Every 2 s, log the guest frame rate measured at guest swaps: average and worst "
+                    "frame time, frames over 33.3 ms, and the frontbuffer size. Cheap; for "
+                    "performance baselines (perf counters cost ~6% CPU).");
+
 REXCVAR_DEFINE_BOOL(clear_memory_page_state, false, "GPU",
                     "Refresh page-valid state from GPU-written memory at frame end. "
                     "Disable for minor CPU overhead reduction, but may break memory coherency.")
@@ -1024,6 +1029,36 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   uint32_t frontbuffer_width = reader->ReadAndSwap<uint32_t>();
   uint32_t frontbuffer_height = reader->ReadAndSwap<uint32_t>();
   reader->AdvanceRead((count - 4) * sizeof(uint32_t));
+
+  if (REXCVAR_GET(log_frame_stats)) {
+    // Runs on the GPU command processor thread only.
+    static uint64_t last_tick = 0, window_start = 0, sum_us = 0, worst_us = 0;
+    static uint32_t frames = 0, slow = 0;
+    const uint64_t now = rex::chrono::Clock::QueryHostTickCount();
+    const uint64_t freq = rex::chrono::Clock::QueryHostTickFrequency();
+    if (last_tick) {
+      const uint64_t dt_us = (now - last_tick) * 1000000 / freq;
+      ++frames;
+      sum_us += dt_us;
+      worst_us = std::max(worst_us, dt_us);
+      if (dt_us > 33333) {
+        ++slow;
+      }
+    }
+    last_tick = now;
+    if (!window_start) {
+      window_start = now;
+    }
+    if (now - window_start >= 2 * freq && frames) {
+      const double seconds = double(now - window_start) / double(freq);
+      REXGPU_INFO("[frame stats] {:.1f} fps, avg {:.2f} ms, worst {:.1f} ms, >33ms {}, frontbuffer {}x{}",
+                  frames / seconds, sum_us / 1000.0 / frames, worst_us / 1000.0, slow,
+                  frontbuffer_width, frontbuffer_height);
+      window_start = now;
+      frames = slow = 0;
+      sum_us = worst_us = 0;
+    }
+  }
 
   {
     PROFILE_SCOPE_COUNTER(kCpuSwapUs);
