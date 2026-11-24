@@ -4542,9 +4542,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   uint32_t normalized_color_mask =
       pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
                    : 0;
+  // Memexport draws (vertex shaders writing guest memory, e.g. GPU skinning) have no pixel shader
+  // either but are not inert - skipping them left skinned vertices stale (invisible while a frame is
+  // frozen, so a paused-scene pixel diff can't catch it).
   if (REXCVAR_GET(vulkan_skip_inert_no_pixel_draws) && pixel_shader == nullptr &&
-      normalized_color_mask == 0 && !normalized_depth_control.z_enable &&
-      !normalized_depth_control.stencil_enable && !active_occlusion_query_.valid) {
+      !memexport_writes_possible && normalized_color_mask == 0 &&
+      !normalized_depth_control.z_enable && !normalized_depth_control.stencil_enable &&
+      !active_occlusion_query_.valid) {
     if (debug_log_frame) {
       ++debug_frame_no_effect_draws_;
     }
