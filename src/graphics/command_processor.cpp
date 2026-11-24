@@ -20,6 +20,14 @@
 #include <immintrin.h>
 #endif
 
+#include <rex/platform.h>
+#if REX_PLATFORM_LINUX
+#include <dirent.h>
+#include <sched.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
 #include <fmt/format.h>
 
 #include <rex/cvar.h>
@@ -47,6 +55,9 @@ REXCVAR_DEFINE_BOOL(vsync, false, "GPU", "Enable vertical sync");
 REXCVAR_DEFINE_INT32(wait_reg_mem_spin_us, 2000, "GPU",
                      "WAIT_REG_MEM: poll with yields for this long before sleeping between polls "
                      "(0 = always sleep, the old behaviour)");
+REXCVAR_DEFINE_INT32(gpu_command_thread_cpu, -1, "GPU",
+                     "Linux: pin the GPU command processor thread to this CPU and keep the other "
+                     "threads of the process off that CPU's core (-1 = off)");
 REXCVAR_DEFINE_INT32(wait_reg_mem_spin_wine_us, 0, "GPU",
                      "wait_reg_mem_spin_us to use under Wine / Proton and on Linux (0 = the same). "
                      "On the Steam Deck a long spin keeps the CPU clock up; on native Windows with "
@@ -291,13 +302,73 @@ void CommandProcessor::SetDesiredSwapPostEffect(SwapPostEffect swap_post_effect)
   CallInThread([this, swap_post_effect]() { swap_post_effect_actual_ = swap_post_effect; });
 }
 
+#if REX_PLATFORM_LINUX
+namespace {
+// gpu_command_thread_cpu: keep every thread of the process except the command processor off the
+// command processor's core (CPUs 2k and 2k+1 are SMT siblings on the Steam Deck's Zen 2).
+void KeepOtherThreadsOffCommandProcessorCore(int cp_cpu, pid_t cp_tid) {
+  const int cpu_count = int(sysconf(_SC_NPROCESSORS_ONLN));
+  cpu_set_t others;
+  CPU_ZERO(&others);
+  for (int i = 0; i < cpu_count; ++i) {
+    if (i != cp_cpu && i != (cp_cpu ^ 1)) {
+      CPU_SET(i, &others);
+    }
+  }
+  DIR* dir = opendir("/proc/self/task");
+  if (!dir) {
+    return;
+  }
+  while (dirent* entry = readdir(dir)) {
+    if (entry->d_name[0] < '0' || entry->d_name[0] > '9') {
+      continue;
+    }
+    const pid_t tid = pid_t(atoi(entry->d_name));
+    if (tid != cp_tid) {
+      sched_setaffinity(tid, sizeof(others), &others);
+    }
+  }
+  closedir(dir);
+}
+}  // namespace
+#endif
+
 void CommandProcessor::WorkerThreadMain() {
   if (!SetupContext()) {
     rex::FatalError("Unable to setup command processor internal state");
     return;
   }
 
+#if REX_PLATFORM_LINUX
+  // A core of its own for the command processor: at 10 W on the Steam Deck, the missed frames were
+  // the same work taking twice as long - the thread preempted, or sharing its core. Pinning it and
+  // keeping the other threads off its core cut them from ~10 to ~3 a minute. Re-applied every 5 s so
+  // threads created later are moved too. Off on machines with fewer than 4 CPUs.
+  const int cp_cpu = REXCVAR_GET(gpu_command_thread_cpu);
+  const bool isolate_cp = cp_cpu >= 0 && cp_cpu < int(sysconf(_SC_NPROCESSORS_ONLN)) &&
+                          sysconf(_SC_NPROCESSORS_ONLN) >= 4;
+  const pid_t cp_tid = pid_t(syscall(SYS_gettid));
+  std::chrono::steady_clock::time_point last_isolation{};
+  if (isolate_cp) {
+    cpu_set_t own;
+    CPU_ZERO(&own);
+    CPU_SET(cp_cpu, &own);
+    if (sched_setaffinity(0, sizeof(own), &own) == 0) {
+      REXGPU_INFO("Command processor pinned to CPU {}, other threads kept off its core", cp_cpu);
+    }
+  }
+#endif
+
   while (worker_running_) {
+#if REX_PLATFORM_LINUX
+    if (isolate_cp) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now - last_isolation > std::chrono::seconds(5)) {
+        last_isolation = now;
+        KeepOtherThreadsOffCommandProcessorCore(cp_cpu, cp_tid);
+      }
+    }
+#endif
     while (!pending_fns_.empty()) {
       auto fn = std::move(pending_fns_.front());
       pending_fns_.pop();
