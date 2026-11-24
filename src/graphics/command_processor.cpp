@@ -50,6 +50,14 @@ REXCVAR_DEFINE_INT32(wait_reg_mem_spin_wine_us, 0, "GPU",
                      "wait_reg_mem_spin_us to use when running under Wine / Proton (0 = the same). "
                      "On the Steam Deck a long spin keeps the CPU clock up; on native Windows with "
                      "NVIDIA a long spin made vkQueueSubmit block (40 FPS instead of 60)");
+REXCVAR_DEFINE_BOOL(wait_reg_mem_spin_wine_adaptive, false, "GPU",
+                    "Use wait_reg_mem_spin_wine_us only for wait_reg_mem_spin_wine_boost_ms after a "
+                    "frame took over 20 ms (to pull the CPU clock back up), the normal "
+                    "wait_reg_mem_spin_us otherwise")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(wait_reg_mem_spin_wine_boost_ms, 3000, "GPU",
+                     "How long a slow frame keeps the long WAIT_REG_MEM spin on (adaptive mode)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(wait_reg_mem_spin_pause, false, "GPU",
                     "WAIT_REG_MEM spin: poll with CPU pause hints instead of OS yields (no kernel "
                     "round trip per poll, less power on the spinning core)")
@@ -1052,6 +1060,18 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   uint32_t frontbuffer_height = reader->ReadAndSwap<uint32_t>();
   reader->AdvanceRead((count - 4) * sizeof(uint32_t));
 
+  {
+    // A frame over 20 ms (a missed vblank) switches the long WAIT_REG_MEM spin on for a while; see
+    // wait_reg_mem_spin_wine_adaptive.
+    const auto now = std::chrono::steady_clock::now();
+    if (last_swap_time_.time_since_epoch().count() &&
+        now - last_swap_time_ > std::chrono::milliseconds(20)) {
+      spin_boost_until_ =
+          now + std::chrono::milliseconds(REXCVAR_GET(wait_reg_mem_spin_wine_boost_ms));
+    }
+    last_swap_time_ = now;
+  }
+
   if (REXCVAR_GET(log_frame_stats)) {
     // Runs on the GPU command processor thread only.
     static uint64_t last_tick = 0, window_start = 0, sum_us = 0, worst_us = 0;
@@ -1275,10 +1295,11 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
       // such waits a frame. Poll with yields for wait_reg_mem_spin_us, then fall back to sleeping
       // so long waits don't burn a core.
       static const bool under_wine = rex::thread::IsRunningUnderWine();
-      const int32_t spin_limit_us =
-          (under_wine && REXCVAR_GET(wait_reg_mem_spin_wine_us) > 0)
-              ? REXCVAR_GET(wait_reg_mem_spin_wine_us)
-              : REXCVAR_GET(wait_reg_mem_spin_us);
+      const bool wine_long_spin =
+          under_wine && REXCVAR_GET(wait_reg_mem_spin_wine_us) > 0 &&
+          (!REXCVAR_GET(wait_reg_mem_spin_wine_adaptive) || wait_start < spin_boost_until_);
+      const int32_t spin_limit_us = wine_long_spin ? REXCVAR_GET(wait_reg_mem_spin_wine_us)
+                                                   : REXCVAR_GET(wait_reg_mem_spin_us);
       const bool spin =
           std::chrono::duration_cast<std::chrono::microseconds>(wait_start - wait_reg_mem_start_)
               .count() < spin_limit_us;

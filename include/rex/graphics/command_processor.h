@@ -102,6 +102,10 @@ class CommandProcessor {
   // WAIT_REG_MEM spin-then-sleep state (CP thread only).
   bool wait_reg_mem_waiting_ = false;
   std::chrono::steady_clock::time_point wait_reg_mem_start_;
+  // wait_reg_mem_spin_wine_adaptive: when the last swap came, and until when the long spin stays on
+  // after a slow frame.
+  std::chrono::steady_clock::time_point last_swap_time_;
+  std::chrono::steady_clock::time_point spin_boost_until_;
 
   enum class SwapPostEffect {
     kNone,
