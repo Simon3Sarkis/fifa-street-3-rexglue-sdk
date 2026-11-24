@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstring>
 #include <string_view>
+#include <vector>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -453,7 +454,17 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
 
   // Volatile for the WAIT_REG_MEM loop.
   const_cast<volatile uint32_t&>(regs.values[index]) = value;
-  if (!regs.GetRegisterInfo(index)) {
+  // Known registers as a bitset built once: GetRegisterInfo is a switch over the whole register
+  // table returning a guarded function-local static, and this runs for every register write
+  // (tens of thousands a frame) only to report unknown ones.
+  static const std::vector<bool> known_registers = [] {
+    std::vector<bool> known(RegisterFile::kRegisterCount);
+    for (uint32_t i = 0; i < RegisterFile::kRegisterCount; ++i) {
+      known[i] = RegisterFile::GetRegisterInfo(i) != nullptr;
+    }
+    return known;
+  }();
+  if (!known_registers[index]) {
     REXGPU_DEBUG("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
   }
 

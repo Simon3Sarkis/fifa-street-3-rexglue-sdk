@@ -133,6 +133,11 @@ REXCVAR_DEFINE_BOOL(vulkan_memexport_barrier_elision, false, "GPU/Vulkan",
 REXCVAR_DEFINE_INT32(debug_log_barrier_pass_ends_remaining, 0, "GPU/Debug",
                      "Log this many render pass ends caused by barriers other than shared memory "
                      "ones (buffers, image layouts and access masks)");
+REXCVAR_DEFINE_BOOL(gpu_skip_unchanged_fetch_constant_writes, false, "GPU/Vulkan",
+                    "Don't invalidate texture bindings, the fetch constant buffer and vertex buffer "
+                    "residency when the guest rewrites a fetch constant with the value it already "
+                    "has")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(debug_log_frame_timing, 0, "GPU/Debug",
                      "Log this many frames' timing: '[frame cpu]' (swap interval, command processor "
                      "waits) and '[frame gpu]' (GPU span; needs GPU timestamps, e.g. "
@@ -2463,7 +2468,20 @@ void VulkanCommandProcessor::ShutdownContext() {
 }
 
 void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+  const bool is_fetch_constant =
+      index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 && index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5;
+  const uint32_t old_value = is_fetch_constant ? register_file_->values[index] : 0;
   CommandProcessor::WriteRegister(index, value);
+  if (is_fetch_constant) {
+    ++fetch_constant_dwords_written_;
+    if (old_value != value) {
+      ++fetch_constant_dwords_changed_;
+    } else if (REXCVAR_GET(gpu_skip_unchanged_fetch_constant_writes)) {
+      // Same value as already in the register: the texture binding, the fetch constant buffer and
+      // the vertex buffer residency derived from it are all still valid.
+      return;
+    }
+  }
 
   if (index >= XE_GPU_REG_SHADER_CONSTANT_000_X && index <= XE_GPU_REG_SHADER_CONSTANT_511_W) {
     if (frame_open_) {
@@ -2570,11 +2588,32 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
 
   if (start_index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
       end_index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) {
+    // Find the dwords whose value actually changes (games often re-upload identical fetch
+    // constants before every draw); with gpu_skip_unchanged_fetch_constant_writes only those
+    // invalidate the derived texture bindings, fetch constant buffer and vertex residency.
+    uint32_t changed_first = UINT32_MAX, changed_last = 0;
+    for (uint32_t i = 0; i < num_registers; ++i) {
+      if (register_file_->values[start_index + i] != rex::byte_swap(base[i])) {
+        changed_first = std::min(changed_first, i);
+        changed_last = i;
+      }
+    }
+    fetch_constant_dwords_written_ += num_registers;
+    if (changed_first != UINT32_MAX) {
+      fetch_constant_dwords_changed_ += changed_last - changed_first + 1;
+    }
     memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+    const bool skip_unchanged = REXCVAR_GET(gpu_skip_unchanged_fetch_constant_writes);
+    if (skip_unchanged && changed_first == UINT32_MAX) {
+      return;
+    }
     current_constant_buffers_up_to_date_ &=
         ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFetch);
-    uint32_t first_fetch_dword = start_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
-    uint32_t last_fetch_dword = end_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
+    uint32_t first_fetch_dword = start_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 +
+                                 (skip_unchanged ? changed_first : 0);
+    uint32_t last_fetch_dword = skip_unchanged
+                                    ? start_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + changed_last
+                                    : end_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
     if (texture_cache_) {
       texture_cache_->TextureFetchConstantsWritten(first_fetch_dword / 6, last_fetch_dword / 6);
     }
@@ -6655,13 +6694,18 @@ void VulkanCommandProcessor::ProcessGpuTimestampResults() {
         uint64_t sum_avg_us = buckets_sum_us / gpu_profile_frames_;
         REXGPU_INFO(
             "Vulkan GPU profile (avg us/frame over {} frames): span={} buckets={} untimed={} "
-            "submissions={} queries={}/{} barrier_pass_ends(shmem/other)={}/{} |{}",
+            "submissions={} queries={}/{} barrier_pass_ends(shmem/other)={}/{} "
+            "fetch_dwords(written/changed)={}/{} |{}",
             gpu_profile_frames_, span_avg_us, sum_avg_us,
             span_avg_us > sum_avg_us ? span_avg_us - sum_avg_us : 0,
             gpu_profile_submissions_ / gpu_profile_frames_, frame.query_count,
             kMaxGpuTimestampQueriesPerFrame,
             gpu_profile_pass_ends_shared_memory_ / gpu_profile_frames_,
-            gpu_profile_pass_ends_other_barriers_ / gpu_profile_frames_, breakdown);
+            gpu_profile_pass_ends_other_barriers_ / gpu_profile_frames_,
+            fetch_constant_dwords_written_ / gpu_profile_frames_,
+            fetch_constant_dwords_changed_ / gpu_profile_frames_, breakdown);
+        fetch_constant_dwords_written_ = 0;
+        fetch_constant_dwords_changed_ = 0;
         gpu_profile_pass_ends_shared_memory_ = 0;
         gpu_profile_pass_ends_other_barriers_ = 0;
         std::memset(gpu_profile_bucket_us_, 0, sizeof(gpu_profile_bucket_us_));

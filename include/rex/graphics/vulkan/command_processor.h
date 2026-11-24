@@ -865,6 +865,9 @@ class VulkanCommandProcessor : public CommandProcessor {
   uint32_t gpu_profile_frames_ = 0;
   // Render passes ended only to record pending barriers, in the profile window: barriers that are all
   // shared memory buffer barriers (memexport commits), and any other.
+  // Fetch constant register dwords written by the guest, and how many of them changed value.
+  uint64_t fetch_constant_dwords_written_ = 0;
+  uint64_t fetch_constant_dwords_changed_ = 0;
   uint64_t gpu_profile_pass_ends_shared_memory_ = 0;
   uint64_t gpu_profile_pass_ends_other_barriers_ = 0;
   struct VertexBufferState {
