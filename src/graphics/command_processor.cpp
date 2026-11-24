@@ -1281,6 +1281,10 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
         }
       } else {
         rex::thread::MaybeYield();
+        if (!worker_running_) {
+          // Long spins (large wait_reg_mem_spin_us) must still notice shutdown.
+          return false;
+        }
       }
       wait_stat_us_[uint32_t(WaitStat::kWaitRegMem)] +=
           uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(

@@ -29,6 +29,9 @@
 #include <ffx_api/ffx_upscale.h>
 #endif
 
+REXCVAR_DEFINE_BOOL(dxgi_ui_tick_timer, false, "UI/Presenter",
+                    "Drive UI ticks from a high-resolution timer at the display refresh rate "
+                    "instead of IDXGIOutput::WaitForVBlank (which Wine emulates by polling)");
 REXCVAR_DEFINE_BOOL(dxgi_ui_tick_limit, true, "UI/Presenter",
                     "Keep DXGI vertical-blank UI ticks at least 90% of a refresh period apart "
                     "(Wine returns from WaitForVBlank early)");
@@ -1848,7 +1851,49 @@ void Presenter::DXGIUITickThread() {
     // to the current output while it's happening) so subscribers can still do
     // early-out checks.
     bool wait_succeeded;
-    {
+    if (REXCVAR_GET(dxgi_ui_tick_timer)) {
+      // Tick from a high-resolution timer at the display's refresh rate, deadline-based so it
+      // doesn't drift, instead of IDXGIOutput::WaitForVBlank. Under Wine / Proton WaitForVBlank is
+      // itself emulated with timer polling and kept this thread at ~40% of a core on the Steam Deck.
+      Microsoft::WRL::ComPtr<IDXGIOutput> dxgi_output = dxgi_ui_tick_output_;
+      dxgi_ui_tick_lock.unlock();
+      static thread_local HANDLE timer = CreateWaitableTimerExW(
+          nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+      static thread_local std::chrono::steady_clock::time_point deadline;
+      static thread_local int refresh_hz = 0;
+      static thread_local std::chrono::steady_clock::time_point refresh_read;
+      auto now = std::chrono::steady_clock::now();
+      if (!refresh_hz || now - refresh_read > std::chrono::seconds(2)) {
+        refresh_read = now;
+        refresh_hz = 60;
+        DXGI_OUTPUT_DESC desc;
+        MONITORINFOEXW monitor_info = {};
+        monitor_info.cbSize = sizeof(monitor_info);
+        DEVMODEW mode = {};
+        mode.dmSize = sizeof(mode);
+        if (SUCCEEDED(dxgi_output->GetDesc(&desc)) &&
+            GetMonitorInfoW(desc.Monitor, &monitor_info) &&
+            EnumDisplaySettingsW(monitor_info.szDevice, ENUM_CURRENT_SETTINGS, &mode) &&
+            mode.dmDisplayFrequency >= 24 && mode.dmDisplayFrequency <= 500) {
+          refresh_hz = int(mode.dmDisplayFrequency);
+        }
+      }
+      const auto period = std::chrono::nanoseconds(1000000000 / refresh_hz);
+      deadline += period;
+      if (deadline < now || deadline > now + 2 * period) {
+        deadline = now + period;  // first tick, or fell behind / clock jump: resynchronize
+      }
+      const auto remaining =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now).count();
+      LARGE_INTEGER due;
+      due.QuadPart = -std::max<int64_t>(remaining / 100, 1);  // relative, 100 ns units
+      if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+        WaitForSingleObject(timer, INFINITE);
+      } else {
+        std::this_thread::sleep_for(deadline - now);
+      }
+      wait_succeeded = true;
+    } else {
       Microsoft::WRL::ComPtr<IDXGIOutput> dxgi_output = dxgi_ui_tick_output_;
       dxgi_ui_tick_lock.unlock();
       wait_succeeded = SUCCEEDED(dxgi_ui_tick_output_->WaitForVBlank());
