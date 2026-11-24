@@ -54,6 +54,17 @@ REXCVAR_DEFINE_INT32(vblank_precise_sleep_margin_us, 1000, "GPU",
     .range(0, 5000)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(vblank_wine_precise_sleep, false, "GPU",
+                    "Under Wine / Proton: sleep the vblank wait with sub-millisecond precision and "
+                    "use vblank_precise_sleep_margin_wine_us as the margin")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(vblank_precise_sleep_margin_wine_us, 250, "GPU",
+                     "vblank_precise_sleep_margin_us when running under Wine / Proton, where host "
+                     "sleeps are precise (the smaller of the two is used)")
+    .range(0, 5000)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_INT32(vblank_precise_spin_us, 150, "GPU",
                      "Final vblank wait window that should busy-spin for tighter pacing")
     .range(0, 1000)
@@ -95,8 +106,16 @@ uint64_t UsToTicksInteger(uint64_t us, uint64_t frequency) {
 }
 
 void PreciseWaitUntilHostTick(uint64_t target_host_tick, uint64_t host_frequency) {
-  const uint64_t sleep_margin_ticks = UsToTicksInteger(
-      uint64_t(std::max(0, REXCVAR_GET(vblank_precise_sleep_margin_us))), host_frequency);
+  // Under Wine / Proton host sleeps are precise to tens of microseconds, so the window spent polling
+  // before the target can be much smaller (the default 1 ms margin kept ~10% of a core busy on the
+  // Steam Deck). Opt-in (vblank_wine_precise_sleep) until it has been measured to help.
+  const bool wine = REXCVAR_GET(vblank_wine_precise_sleep) && rex::thread::IsRunningUnderWine();
+  const int32_t margin_us = wine ? std::min(REXCVAR_GET(vblank_precise_sleep_margin_us),
+                                            REXCVAR_GET(vblank_precise_sleep_margin_wine_us))
+                                 : REXCVAR_GET(vblank_precise_sleep_margin_us);
+  const uint64_t min_sleep_us = wine ? 50 : 1000;
+  const uint64_t sleep_margin_ticks =
+      UsToTicksInteger(uint64_t(std::max(0, margin_us)), host_frequency);
   const uint64_t spin_ticks = UsToTicksInteger(
       uint64_t(std::max(0, REXCVAR_GET(vblank_precise_spin_us))), host_frequency);
 
@@ -109,8 +128,12 @@ void PreciseWaitUntilHostTick(uint64_t target_host_tick, uint64_t host_frequency
     if (remaining_ticks > sleep_margin_ticks && sleep_margin_ticks) {
       uint64_t sleep_ticks = remaining_ticks - sleep_margin_ticks;
       uint64_t sleep_us = TicksToUsInteger(sleep_ticks, host_frequency);
-      if (sleep_us >= 1000) {
-        rex::thread::Sleep(std::chrono::microseconds(sleep_us));
+      if (sleep_us >= min_sleep_us) {
+        if (wine) {
+          rex::thread::SleepPrecise(std::chrono::microseconds(sleep_us));
+        } else {
+          rex::thread::Sleep(std::chrono::microseconds(sleep_us));
+        }
       } else {
         rex::thread::MaybeYield();
       }

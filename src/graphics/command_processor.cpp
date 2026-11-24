@@ -15,6 +15,10 @@
 #include <cstring>
 #include <string_view>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
+
 #include <fmt/format.h>
 
 #include <rex/cvar.h>
@@ -41,6 +45,10 @@ REXCVAR_DEFINE_BOOL(vsync, false, "GPU", "Enable vertical sync");
 REXCVAR_DEFINE_INT32(wait_reg_mem_spin_us, 2000, "GPU",
                      "WAIT_REG_MEM: poll with yields for this long before sleeping between polls "
                      "(0 = always sleep, the old behaviour)");
+REXCVAR_DEFINE_BOOL(wait_reg_mem_spin_pause, false, "GPU",
+                    "WAIT_REG_MEM spin: poll with CPU pause hints instead of OS yields (no kernel "
+                    "round trip per poll, less power on the spinning core)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(log_frame_stats, false, "Perf",
                     "Every 2 s, log the guest frame rate measured at guest swaps: average and worst "
@@ -1280,7 +1288,20 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
           return false;
         }
       } else {
-        rex::thread::MaybeYield();
+        if (REXCVAR_GET(wait_reg_mem_spin_pause)) {
+          // Spin in user mode: the core stays active (on CPUs that clock each core by its activity,
+          // like the Steam Deck's, that keeps the clock up) without a kernel round trip per poll,
+          // and the pause hint lowers the spinning core's power draw.
+#if defined(__x86_64__) || defined(_M_X64)
+          for (int i = 0; i < 64; ++i) {
+            _mm_pause();
+          }
+#else
+          rex::thread::MaybeYield();
+#endif
+        } else {
+          rex::thread::MaybeYield();
+        }
         if (!worker_running_) {
           // Long spins (large wait_reg_mem_spin_us) must still notice shutdown.
           return false;

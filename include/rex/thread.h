@@ -113,6 +113,12 @@ void SyncMemory();
 
 // Sleeps the current thread for at least as long as the given duration.
 void Sleep(std::chrono::microseconds duration);
+// True when the Windows build runs under Wine / Proton (ntdll exports wine_get_version). There,
+// sub-millisecond sleeps are precise; callers may use smaller safety margins.
+bool IsRunningUnderWine();
+// Sleep with sub-millisecond resolution where the host provides it (Wine / Proton, POSIX); on native
+// Windows bound by the timer resolution. Unlike Sleep, short durations never become a yield.
+void SleepPrecise(std::chrono::microseconds duration);
 template <typename Rep, typename Period>
 void Sleep(std::chrono::duration<Rep, Period> duration) {
   Sleep(std::chrono::duration_cast<std::chrono::microseconds>(duration));

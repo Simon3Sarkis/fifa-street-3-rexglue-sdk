@@ -192,6 +192,18 @@ void SyncMemory() {
   __sync_synchronize();
 }
 
+bool IsRunningUnderWine() {
+  return false;
+}
+
+void SleepPrecise(std::chrono::microseconds duration) {
+  timespec ts;
+  ts.tv_sec = duration.count() / 1000000;
+  ts.tv_nsec = (duration.count() % 1000000) * 1000;
+  while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {
+  }
+}
+
 void Sleep(std::chrono::microseconds duration) {
   timespec rqtp = DurationToTimeSpec(duration);
   timespec rmtp = {};

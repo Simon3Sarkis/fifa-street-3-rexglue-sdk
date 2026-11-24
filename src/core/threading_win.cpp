@@ -93,6 +93,35 @@ void SyncMemory() {
   MemoryBarrier();
 }
 
+namespace {
+using NtDelayExecutionFn = LONG(NTAPI*)(BOOLEAN alertable, PLARGE_INTEGER interval);
+NtDelayExecutionFn GetNtDelayExecution() {
+  static const auto fn = reinterpret_cast<NtDelayExecutionFn>(
+      GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtDelayExecution"));
+  return fn;
+}
+}  // namespace
+
+bool IsRunningUnderWine() {
+  static const bool wine = [] {
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
+  }();
+  return wine;
+}
+
+void SleepPrecise(std::chrono::microseconds duration) {
+  // NtDelayExecution takes 100 ns units; under Wine / Proton it maps to a precise host sleep (tens of
+  // microseconds). On native Windows it is bound by the timer resolution like Sleep.
+  if (auto nt_delay = GetNtDelayExecution()) {
+    LARGE_INTEGER interval;
+    interval.QuadPart = -int64_t(duration.count()) * 10;  // relative
+    nt_delay(FALSE, &interval);
+    return;
+  }
+  Sleep(duration);
+}
+
 void Sleep(std::chrono::microseconds duration) {
   if (duration.count() < 100) {
     MaybeYield();
