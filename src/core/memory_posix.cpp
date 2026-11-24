@@ -15,6 +15,9 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <iterator>
+#include <map>
+#include <mutex>
 #include <string>
 
 #include <fcntl.h>
@@ -238,6 +241,73 @@ static PageAccess PermsToPageAccess(const char perms[5]) {
   return w ? PageAccess::kReadWrite : PageAccess::kReadOnly;
 }
 
+// Protections this module set, as [start, end) -> access. QueryProtect used to parse /proc/self/maps
+// on every call - and the MMIO / write-watch fault handler calls it on every watch fault, so with
+// thousands of mappings each guest write to a watched page cost milliseconds on the faulting thread
+// (the native Steam Deck build's render thread stalled ~10 ms a frame). Every mmap / mprotect /
+// munmap here goes through AllocFixed, DeallocFixed, Protect and Map/UnmapFileView, which keep this
+// up to date; addresses never touched by them still fall back to /proc/self/maps.
+struct ShadowRange {
+  uintptr_t end;
+  PageAccess access;
+};
+std::mutex shadow_mutex_;
+std::map<uintptr_t, ShadowRange> shadow_ranges_;
+
+// Removes [begin, end) from the map, splitting ranges that straddle the edges. Caller holds the lock.
+void ShadowEraseLocked(uintptr_t begin, uintptr_t end) {
+  auto it = shadow_ranges_.lower_bound(begin);
+  if (it != shadow_ranges_.begin()) {
+    auto prev = std::prev(it);
+    if (prev->second.end > begin) {
+      ShadowRange old = prev->second;
+      prev->second.end = begin;
+      if (old.end > end) {
+        shadow_ranges_[end] = old;
+      }
+    }
+  }
+  it = shadow_ranges_.lower_bound(begin);
+  while (it != shadow_ranges_.end() && it->first < end) {
+    if (it->second.end > end) {
+      ShadowRange old = it->second;
+      shadow_ranges_.erase(it);
+      shadow_ranges_[end] = old;
+      break;
+    }
+    it = shadow_ranges_.erase(it);
+  }
+}
+
+void ShadowSet(void* base, size_t length, PageAccess access) {
+  const uintptr_t begin = reinterpret_cast<uintptr_t>(base);
+  std::lock_guard<std::mutex> lock(shadow_mutex_);
+  ShadowEraseLocked(begin, begin + length);
+  shadow_ranges_[begin] = {begin + length, access};
+}
+
+void ShadowErase(void* base, size_t length) {
+  const uintptr_t begin = reinterpret_cast<uintptr_t>(base);
+  std::lock_guard<std::mutex> lock(shadow_mutex_);
+  ShadowEraseLocked(begin, begin + length);
+}
+
+bool ShadowLookup(const void* address, PageAccess& access, uintptr_t& end) {
+  const uintptr_t addr = reinterpret_cast<uintptr_t>(address);
+  std::lock_guard<std::mutex> lock(shadow_mutex_);
+  auto it = shadow_ranges_.upper_bound(addr);
+  if (it == shadow_ranges_.begin()) {
+    return false;
+  }
+  --it;
+  if (addr >= it->second.end) {
+    return false;
+  }
+  access = it->second.access;
+  end = it->second.end;
+  return true;
+}
+
 }  // namespace
 #endif  // REX_PLATFORM_LINUX
 
@@ -300,6 +370,10 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
 
   void* result = mmap(base_address, length, prot_initial, flags, -1, 0);
   if (result != MAP_FAILED) {
+#if REX_PLATFORM_LINUX
+    ShadowSet(result, length,
+              allocation_type == AllocationType::kReserve ? PageAccess::kNoAccess : access);
+#endif
     return result;
   }
 #if defined(MAP_FIXED_NOREPLACE) && REX_PLATFORM_LINUX
@@ -311,6 +385,7 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
     // Verify the entire range is mapped before using mprotect
     if (IsRangeFullyMapped(base_address, length)) {
       if (mprotect(base_address, length, static_cast<int>(prot_requested)) == 0) {
+        ShadowSet(base_address, length, access);
         return base_address;
       }
     }
@@ -327,12 +402,18 @@ bool DeallocFixed(void* base_address, size_t length, DeallocationType deallocati
       if (mprotect(base_address, length, PROT_NONE) != 0) {
         return false;
       }
+#if REX_PLATFORM_LINUX
+      ShadowSet(base_address, length, PageAccess::kNoAccess);
+#endif
 #if defined(MADV_DONTNEED)
       (void)madvise(base_address, length, MADV_DONTNEED);
 #endif
       return true;
     }
     case DeallocationType::kRelease: {
+#if REX_PLATFORM_LINUX
+      ShadowErase(base_address, length);
+#endif
       return munmap(base_address, length) == 0;
     }
     default:
@@ -361,9 +442,12 @@ bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* o
   //             atomic in a mutli-threaded process either, but it's something to be aware of.
   // Query old access before changing, if the caller needs it
   if (out_old_access) {
-    LinuxMapEntry e;
-    if (FindEntryForAddress(base_address, e)) {
-      *out_old_access = PermsToPageAccess(e.perms);
+    uintptr_t shadow_end;
+    if (!ShadowLookup(base_address, *out_old_access, shadow_end)) {
+      LinuxMapEntry e;
+      if (FindEntryForAddress(base_address, e)) {
+        *out_old_access = PermsToPageAccess(e.perms);
+      }
     }
   }
 #endif
@@ -374,6 +458,11 @@ bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* o
     REXSYS_ERROR("mprotect({}, 0x{:X}, {}) failed: {} ({})", base_address, length, prot,
                  strerror(errno), errno);
   }
+#if REX_PLATFORM_LINUX
+  else {
+    ShadowSet(base_address, length, access);
+  }
+#endif
   return ret == 0;
 }
 
@@ -419,6 +508,12 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 #else
   access_out = PageAccess::kNoAccess;
   length = 0;
+
+  uintptr_t shadow_end;
+  if (ShadowLookup(base_address, access_out, shadow_end)) {
+    length = static_cast<size_t>(shadow_end - reinterpret_cast<uintptr_t>(base_address));
+    return true;
+  }
 
   LinuxMapEntry e;
   if (!FindEntryForAddress(base_address, e)) {
@@ -534,10 +629,16 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
     return nullptr;
   }
 
+#if REX_PLATFORM_LINUX
+  ShadowSet(result, length, access);
+#endif
   return result;
 }
 
 bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length) {
+#if REX_PLATFORM_LINUX
+  ShadowErase(base_address, length);
+#endif
   return munmap(base_address, length) == 0;
 }
 
