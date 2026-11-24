@@ -87,6 +87,19 @@ class InputSystem : public system::IInputSystem {
   std::vector<DeviceInfo> devices_;
   std::vector<InputDriver*> device_owners_;
 
+  // input_device_refresh_ms: when devices were last enumerated, and capabilities answered since
+  // then (they don't change while a device stays connected). Each enumeration / capabilities query
+  // is a device I/O round trip under Wine; the game asks for every user every frame.
+  uint64_t last_refresh_ms_ = 0;
+  bool refreshed_once_ = false;
+  struct CachedCapabilities {
+    DeviceId id;
+    uint32_t flags;
+    X_RESULT result;
+    X_INPUT_CAPABILITIES caps;
+  };
+  std::vector<CachedCapabilities> cached_capabilities_;
+
   std::unique_ptr<InputScript> script_;
 };
 

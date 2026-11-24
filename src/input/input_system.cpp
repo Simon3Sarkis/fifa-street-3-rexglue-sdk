@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -52,6 +53,11 @@ REXCVAR_DEFINE_STRING(input_script, "", "Input",
                       "relative paths resolve next to the exe. Empty = off");
 
 REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");
+REXCVAR_DEFINE_UINT32(input_device_refresh_ms, 0, "Input",
+                      "Re-enumerate input devices at most this often (ms) instead of on every "
+                      "guest input call, and reuse device capabilities in between. 0 = every "
+                      "call. Under Wine each enumeration is a device I/O round trip per pad slot")
+    .range(0, 10000);
 // Back+Start is deliberately not the default: Steam Input uses View+Menu
 // (Back+Start) as its Guide-button chord on pads without a Guide button, so
 // opening our settings would also pop the Steam overlay.
@@ -164,6 +170,18 @@ void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignme
 }
 
 void InputSystem::RefreshDevices() {
+  const uint32_t refresh_ms = REXCVAR_GET(input_device_refresh_ms);
+  if (refresh_ms) {
+    const uint64_t now_ms = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    if (refreshed_once_ && now_ms - last_refresh_ms_ < refresh_ms) {
+      return;
+    }
+    refreshed_once_ = true;
+    last_refresh_ms_ = now_ms;
+  }
+  cached_capabilities_.clear();
   std::vector<DeviceInfo> seen;
   std::vector<InputDriver*> owners;
   std::vector<DeviceInfo> enumerated;
@@ -294,7 +312,20 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
   if (!driver) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
-  return driver->GetDeviceCapabilities(chosen, flags, out_caps);
+  if (!REXCVAR_GET(input_device_refresh_ms)) {
+    return driver->GetDeviceCapabilities(chosen, flags, out_caps);
+  }
+  for (const CachedCapabilities& cached : cached_capabilities_) {
+    if (cached.id == chosen && cached.flags == flags) {
+      *out_caps = cached.caps;
+      return cached.result;
+    }
+  }
+  X_INPUT_CAPABILITIES caps = {};
+  X_RESULT result = driver->GetDeviceCapabilities(chosen, flags, &caps);
+  cached_capabilities_.push_back({chosen, flags, result, caps});
+  *out_caps = caps;
+  return result;
 }
 
 X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
