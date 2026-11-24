@@ -570,6 +570,10 @@ class VulkanCommandProcessor : public CommandProcessor {
   uint32_t debug_frame_placeholder_draws_ = 0;
   uint32_t debug_frame_no_effect_draws_ = 0;
   uint32_t debug_frame_memexport_draws_ = 0;
+  uint32_t debug_draws_since_memexport_ = 0;
+  // vulkan_memexport_barrier_elision: this draw's shared memory reads / writes, [start, end).
+  std::vector<std::pair<uint32_t, uint32_t>> draw_shared_reads_;
+  std::vector<std::pair<uint32_t, uint32_t>> draw_shared_writes_;
   uint32_t debug_frame_resolve_ranges_ = 0;
   uint32_t debug_frame_scaled_resolve_ranges_ = 0;
   uint64_t debug_frame_resolve_bytes_ = 0;
@@ -859,6 +863,10 @@ class VulkanCommandProcessor : public CommandProcessor {
   uint64_t gpu_profile_span_us_ = 0;
   uint64_t gpu_profile_submissions_ = 0;
   uint32_t gpu_profile_frames_ = 0;
+  // Render passes ended only to record pending barriers, in the profile window: barriers that are all
+  // shared memory buffer barriers (memexport commits), and any other.
+  uint64_t gpu_profile_pass_ends_shared_memory_ = 0;
+  uint64_t gpu_profile_pass_ends_other_barriers_ = 0;
   struct VertexBufferState {
     uint32_t address = UINT32_MAX;
     uint32_t size = UINT32_MAX;

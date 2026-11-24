@@ -125,6 +125,14 @@ REXCVAR_DEFINE_STRING(debug_log_draws_ps, "", "GPU/Debug",
                       "their render-backend state (targets, formats, depth/stencil, blend)");
 REXCVAR_DEFINE_INT32(debug_log_draws_remaining, 0, "GPU/Debug",
                      "How many draw-state lines debug_log_draws_ps may still write");
+REXCVAR_DEFINE_BOOL(vulkan_memexport_barrier_elision, false, "GPU/Vulkan",
+                    "Track the exact shared memory ranges guest draws read and memexport, and "
+                    "insert a shared memory barrier only on a real hazard instead of around every "
+                    "memexport draw (each such barrier ends the render pass)")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(debug_log_memexport_remaining, 0, "GPU/Debug",
+                     "Log this many memexport-capable draws (shaders, destination ranges, whether "
+                     "a render pass is open)");
 REXCVAR_DEFINE_BOOL(vulkan_gpu_timestamp_per_draw, false, "GPU/Vulkan",
                     "While vulkan_gpu_timestamp_trace_frames is active, time every draw on its own "
                     "(instead of merging consecutive draws of a bucket) and label it with its vertex "
@@ -3523,6 +3531,14 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
     }
     return false;
   }
+  if (in_render_pass_) {
+    bool shared_memory_only = pending_barriers_image_memory_barriers_.empty();
+    for (const VkBufferMemoryBarrier& b : pending_barriers_buffer_memory_barriers_) {
+      shared_memory_only &= b.buffer == shared_memory_->buffer();
+    }
+    ++(shared_memory_only ? gpu_profile_pass_ends_shared_memory_
+                          : gpu_profile_pass_ends_other_barriers_);
+  }
   EndRenderPass();
   for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend(); ++it) {
     auto it_next = std::next(it);
@@ -4865,6 +4881,24 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       memexport_extent_end =
           std::max(memexport_extent_end, memexport_range_base_bytes + memexport_range.size_bytes);
     }
+    if (memexport_writes_possible) {
+      const int32_t log_remaining = REXCVAR_GET(debug_log_memexport_remaining);
+      if (log_remaining > 0) {
+        REXCVAR_SET(debug_log_memexport_remaining, log_remaining - 1);
+        REXGPU_INFO(
+            "[memexport] frame={} vs={:016X}{} ps={:016X}{} ranges={} extent={:08X}..{:08X} "
+            "in_pass={} rt_pass_changes={} draws_since_prev={} raster={}",
+            frame_current_, vertex_shader->ucode_data_hash(),
+            memexport_used_vertex ? "(eM)" : "",
+            pixel_shader ? pixel_shader->ucode_data_hash() : 0, memexport_used_pixel ? "(eM)" : "",
+            memexport_ranges_.size(), memexport_extent_start, memexport_extent_end,
+            in_render_pass_, current_framebuffer_ != render_target_cache_->last_update_framebuffer(),
+            debug_draws_since_memexport_, is_rasterization_done);
+      }
+      debug_draws_since_memexport_ = 0;
+    } else {
+      ++debug_draws_since_memexport_;
+    }
     if (memexport_writes_possible && memexport_ranges_.empty()) {
       if (!shared_memory_->RequestRange(0, SharedMemory::kBufferSize)) {
         REXGPU_ERROR(
@@ -4915,7 +4949,54 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     // TODO(Triang3l): Find some PM4 command that can be used for indication of
     // when memexports should be awaited instead of inserting the barrier in Use
     // every time if memory export was done in the previous draw?
-    if (memexport_extent_start < memexport_extent_end) {
+    if (REXCVAR_GET(vulkan_memexport_barrier_elision) &&
+        !(memexport_writes_possible && memexport_ranges_.empty())) {
+      // Exact ranges this draw reads and writes in shared memory, as [start, end).
+      draw_shared_reads_.clear();
+      draw_shared_writes_.clear();
+      auto add_range = [](std::vector<std::pair<uint32_t, uint32_t>>& list, uint64_t start,
+                          uint64_t length) {
+        if (!length) {
+          return;
+        }
+        uint64_t end = std::min<uint64_t>(start + length, SharedMemory::kBufferSize);
+        start = std::min<uint64_t>(start, SharedMemory::kBufferSize);
+        if (start < end) {
+          list.emplace_back(uint32_t(start), uint32_t(end));
+        }
+      };
+      for (const Shader* shader : {static_cast<const Shader*>(vertex_shader),
+                                   static_cast<const Shader*>(pixel_shader)}) {
+        if (!shader) {
+          continue;
+        }
+        const Shader::ConstantRegisterMap& map = shader->constant_register_map();
+        for (uint32_t i = 0; i < rex::countof(map.vertex_fetch_bitmap); ++i) {
+          uint32_t bits = map.vertex_fetch_bitmap[i];
+          uint32_t j;
+          while (rex::bit_scan_forward(bits, &j)) {
+            bits &= ~(uint32_t(1) << j);
+            xenos::xe_gpu_vertex_fetch_t vfetch = regs.GetVertexFetch(i * 32 + j);
+            add_range(draw_shared_reads_, uint64_t(vfetch.address) << 2,
+                      uint64_t(vfetch.size) << 2);
+          }
+        }
+      }
+      if (primitive_processing_result.index_buffer_type ==
+          PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA) {
+        add_range(draw_shared_reads_, primitive_processing_result.guest_index_base,
+                  uint64_t(primitive_processing_result.host_draw_vertex_count) *
+                      (primitive_processing_result.host_index_format == xenos::IndexFormat::kInt16
+                           ? sizeof(uint16_t)
+                           : sizeof(uint32_t)));
+      }
+      for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
+        add_range(draw_shared_writes_, uint64_t(memexport_range.base_address_dwords) << 2,
+                  memexport_range.size_bytes);
+      }
+      shared_memory_->UseForDraw(draw_shared_reads_.data(), draw_shared_reads_.size(),
+                                 draw_shared_writes_.data(), draw_shared_writes_.size());
+    } else if (memexport_extent_start < memexport_extent_end) {
       shared_memory_->Use(
           VulkanSharedMemory::Usage::kGuestDrawReadWrite,
           std::make_pair(memexport_extent_start, memexport_extent_end - memexport_extent_start));
@@ -6497,11 +6578,15 @@ void VulkanCommandProcessor::ProcessGpuTimestampResults() {
         uint64_t sum_avg_us = buckets_sum_us / gpu_profile_frames_;
         REXGPU_INFO(
             "Vulkan GPU profile (avg us/frame over {} frames): span={} buckets={} untimed={} "
-            "submissions={} queries={}/{} |{}",
+            "submissions={} queries={}/{} barrier_pass_ends(shmem/other)={}/{} |{}",
             gpu_profile_frames_, span_avg_us, sum_avg_us,
             span_avg_us > sum_avg_us ? span_avg_us - sum_avg_us : 0,
             gpu_profile_submissions_ / gpu_profile_frames_, frame.query_count,
-            kMaxGpuTimestampQueriesPerFrame, breakdown);
+            kMaxGpuTimestampQueriesPerFrame,
+            gpu_profile_pass_ends_shared_memory_ / gpu_profile_frames_,
+            gpu_profile_pass_ends_other_barriers_ / gpu_profile_frames_, breakdown);
+        gpu_profile_pass_ends_shared_memory_ = 0;
+        gpu_profile_pass_ends_other_barriers_ = 0;
         std::memset(gpu_profile_bucket_us_, 0, sizeof(gpu_profile_bucket_us_));
         std::memset(gpu_profile_bucket_n_, 0, sizeof(gpu_profile_bucket_n_));
         gpu_profile_span_us_ = 0;

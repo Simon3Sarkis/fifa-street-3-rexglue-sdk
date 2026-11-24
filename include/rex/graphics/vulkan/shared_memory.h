@@ -47,6 +47,16 @@ class VulkanSharedMemory : public SharedMemory {
   // read-write accesses are ordered with each other.
   void Use(Usage usage, std::pair<uint32_t, uint32_t> written_range = {});
 
+  // Guest draw variant of Use with exact hazard tracking. reads / writes are this draw's shared memory
+  // ranges as [start, end) byte pairs - every vfetch range and the guest DMA index range (Xenos shaders
+  // reach memory only through these and textures, which have their own loads and barriers), and the
+  // memexport destinations. A barrier is recorded only for a real hazard since the last one: a read or
+  // write overlapping a write not yet made visible, or a write overlapping a read. Avoids ending the
+  // render pass around every memexport (vertex skinning) draw. Any other Use() call invalidates the
+  // tracking, and the next draw then takes a full barrier.
+  void UseForDraw(const std::pair<uint32_t, uint32_t>* reads, size_t read_count,
+                  const std::pair<uint32_t, uint32_t>* writes, size_t write_count);
+
   VkBuffer buffer() const { return buffer_; }
 
  protected:
@@ -69,6 +79,11 @@ class VulkanSharedMemory : public SharedMemory {
 
   Usage last_usage_;
   std::pair<uint32_t, uint32_t> last_written_range_;
+
+  // UseForDraw state since the last shared memory barrier, as [start, end) pairs.
+  bool draw_tracking_valid_ = false;
+  std::vector<std::pair<uint32_t, uint32_t>> draw_pending_writes_;
+  std::vector<std::pair<uint32_t, uint32_t>> draw_reads_;
 
   std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> upload_buffer_pool_;
   std::vector<VkBufferCopy> upload_regions_;

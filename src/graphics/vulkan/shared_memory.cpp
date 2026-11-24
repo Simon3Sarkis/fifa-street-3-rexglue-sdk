@@ -225,6 +225,72 @@ void VulkanSharedMemory::Use(Usage usage, std::pair<uint32_t, uint32_t> written_
         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
   }
   last_written_range_ = written_range;
+  draw_tracking_valid_ = false;
+}
+
+void VulkanSharedMemory::UseForDraw(const std::pair<uint32_t, uint32_t>* reads, size_t read_count,
+                                    const std::pair<uint32_t, uint32_t>* writes,
+                                    size_t write_count) {
+  auto overlaps = [](const std::vector<std::pair<uint32_t, uint32_t>>& list,
+                     std::pair<uint32_t, uint32_t> r) {
+    for (const auto& l : list) {
+      if (r.first < l.second && l.first < r.second) {
+        return true;
+      }
+    }
+    return false;
+  };
+  bool hazard = !draw_tracking_valid_;
+  for (size_t i = 0; !hazard && i < read_count; ++i) {
+    hazard = overlaps(draw_pending_writes_, reads[i]);
+  }
+  for (size_t i = 0; !hazard && i < write_count; ++i) {
+    hazard = overlaps(draw_pending_writes_, writes[i]) || overlaps(draw_reads_, writes[i]);
+  }
+  if (hazard) {
+    VkPipelineStageFlags src_stage_mask, dst_stage_mask;
+    VkAccessFlags src_access_mask, dst_access_mask;
+    // While tracking, everything since the last barrier was guest draws (read-write masks cover
+    // them); otherwise whatever Use() saw last, which may be a transfer, compute or other access.
+    GetUsageMasks(draw_tracking_valid_ ? Usage::kGuestDrawReadWrite : last_usage_, src_stage_mask,
+                  src_access_mask);
+    GetUsageMasks(Usage::kGuestDrawReadWrite, dst_stage_mask, dst_access_mask);
+    command_processor_.PushBufferMemoryBarrier(buffer_, 0, VK_WHOLE_SIZE, src_stage_mask,
+                                               dst_stage_mask, src_access_mask, dst_access_mask,
+                                               VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+                                               false);
+    draw_pending_writes_.clear();
+    draw_reads_.clear();
+  }
+  draw_reads_.insert(draw_reads_.end(), reads, reads + read_count);
+  draw_pending_writes_.insert(draw_pending_writes_.end(), writes, writes + write_count);
+  // Bound the lists (conservatively: one covering range) so the checks stay cheap.
+  auto collapse = [](std::vector<std::pair<uint32_t, uint32_t>>& list) {
+    if (list.size() > 1024) {
+      std::pair<uint32_t, uint32_t> all{UINT32_MAX, 0};
+      for (const auto& l : list) {
+        all.first = std::min(all.first, l.first);
+        all.second = std::max(all.second, l.second);
+      }
+      list.assign(1, all);
+    }
+  };
+  collapse(draw_reads_);
+  collapse(draw_pending_writes_);
+  draw_tracking_valid_ = true;
+  // Keep Use() correct for whatever comes next: its usage change from the draw read-write state
+  // makes it barrier the whole buffer against all of the above.
+  last_usage_ = Usage::kGuestDrawReadWrite;
+  if (draw_pending_writes_.empty()) {
+    last_written_range_ = {0, 0};
+  } else {
+    uint32_t s = UINT32_MAX, e = 0;
+    for (const auto& w : draw_pending_writes_) {
+      s = std::min(s, w.first);
+      e = std::max(e, w.second);
+    }
+    last_written_range_ = {s, e - s};
+  }
 }
 
 bool VulkanSharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
