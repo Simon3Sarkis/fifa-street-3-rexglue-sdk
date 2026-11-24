@@ -133,6 +133,11 @@ REXCVAR_DEFINE_BOOL(vulkan_memexport_barrier_elision, false, "GPU/Vulkan",
 REXCVAR_DEFINE_INT32(debug_log_barrier_pass_ends_remaining, 0, "GPU/Debug",
                      "Log this many render pass ends caused by barriers other than shared memory "
                      "ones (buffers, image layouts and access masks)");
+REXCVAR_DEFINE_INT32(debug_log_frame_timing, 0, "GPU/Debug",
+                     "Log this many frames' timing: '[frame cpu]' (swap interval, command processor "
+                     "waits) and '[frame gpu]' (GPU span; needs GPU timestamps, e.g. "
+                     "vulkan_gpu_timestamp_buckets) lines, joined by frame number")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_INT32(debug_log_memexport_remaining, 0, "GPU/Debug",
                      "Log this many memexport-capable draws (shaders, destination ranges, whether "
                      "a render pass is open)");
@@ -2608,6 +2613,49 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   SCOPE_profile_cpu_f("gpu");
   vertex_buffers_in_sync_[0] = 0;
   vertex_buffers_in_sync_[1] = 0;
+
+  if (REXCVAR_GET(debug_log_frame_timing) > 0) {
+    // Per-frame CPU side: swap-to-swap interval and this frame's command-processor waits (deltas of
+    // the cumulative wait stats). Joined with the "[frame gpu]" line by frame number.
+    static std::chrono::steady_clock::time_point last_swap;
+    static uint64_t last_us[uint32_t(WaitStat::kCount)] = {};
+    const auto now = std::chrono::steady_clock::now();
+    uint64_t delta[uint32_t(WaitStat::kCount)];
+    for (uint32_t i = 0; i < uint32_t(WaitStat::kCount); ++i) {
+      delta[i] = wait_stat_us_[i] - last_us[i];
+      last_us[i] = wait_stat_us_[i];
+    }
+    // This thread's own CPU time over the frame: much lower than the wall-clock busy time means the
+    // thread was preempted or blocked somewhere the wait stats don't cover.
+    static uint64_t last_thread_cpu_us = 0;
+    uint64_t thread_cpu_us = 0;
+#if REX_PLATFORM_WIN32
+    FILETIME creation_time, exit_time, kernel_time, user_time;
+    if (GetThreadTimes(GetCurrentThread(), &creation_time, &exit_time, &kernel_time, &user_time)) {
+      thread_cpu_us = ((uint64_t(kernel_time.dwHighDateTime) << 32 | kernel_time.dwLowDateTime) +
+                       (uint64_t(user_time.dwHighDateTime) << 32 | user_time.dwLowDateTime)) /
+                      10;
+    }
+#else
+    timespec thread_ts;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &thread_ts) == 0) {
+      thread_cpu_us = uint64_t(thread_ts.tv_sec) * 1000000 + uint64_t(thread_ts.tv_nsec) / 1000;
+    }
+#endif
+    if (last_swap.time_since_epoch().count()) {
+      REXCVAR_SET(debug_log_frame_timing, REXCVAR_GET(debug_log_frame_timing) - 1);
+      REXGPU_INFO(
+          "[frame cpu] {} interval_us={} wait_reg_mem_us={} no_commands_us={} gpu_fence_us={} "
+          "swap_us={} submit_us={} thread_cpu_us={}",
+          frame_current_,
+          std::chrono::duration_cast<std::chrono::microseconds>(now - last_swap).count(),
+          delta[uint32_t(WaitStat::kWaitRegMem)], delta[uint32_t(WaitStat::kIdleNoCommands)],
+          delta[uint32_t(WaitStat::kGpuFence)], delta[uint32_t(WaitStat::kSwap)],
+          delta[uint32_t(WaitStat::kSubmit)], thread_cpu_us - last_thread_cpu_us);
+    }
+    last_thread_cpu_us = thread_cpu_us;
+    last_swap = now;
+  }
 
   if (!graphics_system_)
     return;
@@ -6451,6 +6499,12 @@ void VulkanCommandProcessor::ProcessGpuTimestampResults() {
       int64_t elapsed_us = timestamp_delta_us(frame.frame_start_query, frame.frame_end_query);
       if (elapsed_us > 0) {
         frame_span_us = elapsed_us;
+        if (REXCVAR_GET(debug_log_frame_timing) > 0) {
+          REXGPU_INFO("[frame gpu] {} span_us={} submissions={}", frame.frame, elapsed_us,
+                      frame.submission >= frame.first_submission
+                          ? frame.submission - frame.first_submission + 1
+                          : 0);
+        }
         rex::perf::IncrementCounter(rex::perf::CounterId::kGpuCommandProcessorFrameUs,
                                     elapsed_us);
         rex::perf::IncrementCounter(rex::perf::CounterId::kGpuTimestampedFrames);
