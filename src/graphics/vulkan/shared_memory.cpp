@@ -339,6 +339,10 @@ bool VulkanSharedMemory::UploadRanges(
   if (upload_page_ranges.empty()) {
     return true;
   }
+  for (const auto& range : upload_page_ranges) {
+    VulkanCommandProcessor::frame_work_.upload_bytes.fetch_add(
+        uint64_t(range.second) << page_size_log2(), std::memory_order_relaxed);
+  }
   // Attribute the GPU time of the upload copies (and the barriers around
   // them) to the shared memory upload profiling bucket.
   command_processor_.BeginGpuTimestampedRegion(rex::perf::DrawBucket::kSharedMemoryUpload);

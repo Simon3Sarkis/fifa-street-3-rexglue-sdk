@@ -2685,12 +2685,16 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
       REXCVAR_SET(debug_log_frame_timing, REXCVAR_GET(debug_log_frame_timing) - 1);
       REXGPU_INFO(
           "[frame cpu] {} interval_us={} wait_reg_mem_us={} no_commands_us={} gpu_fence_us={} "
-          "swap_us={} submit_us={} thread_cpu_us={}",
+          "swap_us={} submit_us={} thread_cpu_us={} draws={} copies={} texture_loads={} "
+          "upload_kb={} pipelines={}",
           frame_current_,
           std::chrono::duration_cast<std::chrono::microseconds>(now - last_swap).count(),
           delta[uint32_t(WaitStat::kWaitRegMem)], delta[uint32_t(WaitStat::kIdleNoCommands)],
           delta[uint32_t(WaitStat::kGpuFence)], delta[uint32_t(WaitStat::kSwap)],
-          delta[uint32_t(WaitStat::kSubmit)], thread_cpu_us - last_thread_cpu_us);
+          delta[uint32_t(WaitStat::kSubmit)], thread_cpu_us - last_thread_cpu_us,
+          frame_work_.draws.exchange(0), frame_work_.copies.exchange(0),
+          frame_work_.texture_loads.exchange(0), frame_work_.upload_bytes.exchange(0) >> 10,
+          frame_work_.pipelines_created.exchange(0));
     }
     last_thread_cpu_us = thread_cpu_us;
     last_swap = now;
@@ -4222,6 +4226,7 @@ bool HashInList(const std::string& list, uint64_t hash) {
 bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                                        IndexBufferInfo* index_buffer_info,
                                        bool major_mode_explicit) {
+  frame_work_.draws.fetch_add(1, std::memory_order_relaxed);
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -5466,6 +5471,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
 }
 
 bool VulkanCommandProcessor::IssueCopy() {
+  frame_work_.copies.fetch_add(1, std::memory_order_relaxed);
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -6388,6 +6394,8 @@ void VulkanCommandProcessor::BeginGpuTimestampFrame() {
   frame.query_count = 0;
   frame.frame_start_query = UINT32_MAX;
   frame.frame_end_query = UINT32_MAX;
+  frame.submission_start_queries.clear();
+  frame.submission_end_queries.clear();
   frame.pending = false;
   frame.active_bucket_valid = false;
   frame.active_bucket = rex::perf::DrawBucket::kMainColorDepth;
@@ -6417,6 +6425,39 @@ void VulkanCommandProcessor::BeginGpuTimestampFrame() {
   deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                                gpu_timestamp_query_pool_,
                                                frame.query_base + frame.frame_start_query);
+  frame.submission_start_queries.push_back(frame.frame_start_query);
+}
+
+void VulkanCommandProcessor::GpuTimestampSubmissionEdge(bool begin) {
+  if (!gpu_timestamp_resources_available_ || gpu_timestamp_query_pool_ == VK_NULL_HANDLE ||
+      REXCVAR_GET(debug_log_frame_timing) <= 0) {
+    return;
+  }
+  GpuTimestampFrame& frame = gpu_timestamp_frames_[frame_current_ % kMaxFramesInFlight];
+  if (frame.frame != frame_current_ || frame.frame_start_query == UINT32_MAX ||
+      frame.query_count + 2 >= kMaxGpuTimestampQueriesPerFrame) {
+    return;
+  }
+  const size_t starts = frame.submission_start_queries.size();
+  const size_t ends = frame.submission_end_queries.size();
+  if (begin) {
+    // A later submission of an already started frame.
+    if (frame.pending || starts != ends) {
+      return;
+    }
+    uint32_t query = frame.query_count++;
+    deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                                 gpu_timestamp_query_pool_, frame.query_base + query);
+    frame.submission_start_queries.push_back(query);
+  } else {
+    if (starts != ends + 1) {
+      return;
+    }
+    uint32_t query = frame.query_count++;
+    deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                                 gpu_timestamp_query_pool_, frame.query_base + query);
+    frame.submission_end_queries.push_back(query);
+  }
 }
 
 void VulkanCommandProcessor::EndGpuTimestampFrame() {
@@ -6539,10 +6580,15 @@ void VulkanCommandProcessor::ProcessGpuTimestampResults() {
       if (elapsed_us > 0) {
         frame_span_us = elapsed_us;
         if (REXCVAR_GET(debug_log_frame_timing) > 0) {
-          REXGPU_INFO("[frame gpu] {} span_us={} submissions={}", frame.frame, elapsed_us,
-                      frame.submission >= frame.first_submission
-                          ? frame.submission - frame.first_submission + 1
-                          : 0);
+          int64_t busy_us = 0;
+          size_t pairs = std::min(frame.submission_start_queries.size(),
+                                  frame.submission_end_queries.size());
+          for (size_t i = 0; i < pairs; ++i) {
+            busy_us += std::max<int64_t>(0, timestamp_delta_us(frame.submission_start_queries[i],
+                                                               frame.submission_end_queries[i]));
+          }
+          REXGPU_INFO("[frame gpu] {} span_us={} busy_us={} submissions={}", frame.frame,
+                      elapsed_us, busy_us, pairs);
         }
         rex::perf::IncrementCounter(rex::perf::CounterId::kGpuCommandProcessorFrameUs,
                                     elapsed_us);
@@ -7243,6 +7289,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     // the end of the submission (when async pipeline object creation requests
     // are fulfilled).
     deferred_command_buffer_.Reset();
+    GpuTimestampSubmissionEdge(true);
 
     // Reset cached state of the command buffer.
     dynamic_viewport_update_needed_ = true;
@@ -7513,6 +7560,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
           rex::perf::CounterId::kCpuD3D12SubmitBarriersUs);
       SubmitBarriers(true);
     }
+    GpuTimestampSubmissionEdge(false);
     if (is_closing_frame) {
       EndGpuTimestampFrame();
     }

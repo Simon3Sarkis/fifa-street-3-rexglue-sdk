@@ -1768,6 +1768,7 @@ VkDescriptorSet VulkanTextureCache::GetLoadSourceTexelBufferDescriptorSet(VkBuff
 
 bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
                                                                bool load_mips) {
+  VulkanCommandProcessor::frame_work_.texture_loads.fetch_add(1, std::memory_order_relaxed);
   VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
   TextureKey texture_key = vulkan_texture.key();
   DebugLogTeamProfileBackgroundGpuEvent("load-enter", UINT32_MAX, texture);

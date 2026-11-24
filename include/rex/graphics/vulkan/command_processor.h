@@ -11,6 +11,7 @@
  */
 
 #include <array>
+#include <atomic>
 #include <climits>
 #include <cstdint>
 #include <deque>
@@ -49,6 +50,16 @@ class Device;
 }
 
 namespace rex::graphics::vulkan {
+
+// debug_log_frame_timing: per-frame work counters (atomics - textures and pipelines may be handled
+// on other threads).
+struct VulkanFrameWorkCounters {
+  std::atomic<uint32_t> draws{0};
+  std::atomic<uint32_t> copies{0};
+  std::atomic<uint32_t> texture_loads{0};
+  std::atomic<uint32_t> pipelines_created{0};
+  std::atomic<uint64_t> upload_bytes{0};
+};
 
 class VulkanCommandProcessor : public CommandProcessor {
  public:
@@ -457,6 +468,9 @@ class VulkanCommandProcessor : public CommandProcessor {
   void ShutdownGpuTimestampResources();
   void BeginGpuTimestampFrame();
   void EndGpuTimestampFrame();
+  // debug_log_frame_timing: timestamp the start (begin = true) or end of a queue submission
+  // belonging to the current frame, for the frame's GPU busy time.
+  void GpuTimestampSubmissionEdge(bool begin);
   void ResolveGpuTimestampFrame(VkCommandBuffer command_buffer);
   void ProcessGpuTimestampResults();
   // vs/ps/vertices label the interval in per-draw traces (vulkan_gpu_timestamp_per_draw).
@@ -838,6 +852,11 @@ class VulkanCommandProcessor : public CommandProcessor {
     uint32_t query_count = 0;
     uint32_t frame_start_query = UINT32_MAX;
     uint32_t frame_end_query = UINT32_MAX;
+    // Start / end timestamps of each queue submission the frame spans (the first start is
+    // frame_start_query): their summed intervals are the GPU's busy time, excluding idle gaps
+    // between submissions.
+    std::vector<uint32_t> submission_start_queries;
+    std::vector<uint32_t> submission_end_queries;
     bool pending = false;
     bool active_bucket_valid = false;
     // vulkan_gpu_timestamp_per_draw as it was when the frame began.
@@ -865,6 +884,11 @@ class VulkanCommandProcessor : public CommandProcessor {
   uint32_t gpu_profile_frames_ = 0;
   // Render passes ended only to record pending barriers, in the profile window: barriers that are all
   // shared memory buffer barriers (memexport commits), and any other.
+ public:
+  // debug_log_frame_timing: work done per frame, printed and reset on the '[frame cpu]' line.
+  static inline VulkanFrameWorkCounters frame_work_;
+
+ private:
   // Fetch constant register dwords written by the guest, and how many of them changed value.
   uint64_t fetch_constant_dwords_written_ = 0;
   uint64_t fetch_constant_dwords_changed_ = 0;
