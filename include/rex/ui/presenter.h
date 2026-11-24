@@ -1167,6 +1167,10 @@ class Presenter {
   std::condition_variable dxgi_ui_tick_signal_condition_;
 
   std::thread dxgi_ui_tick_thread_;
+#else
+  // UI paint spacing without a vblank tick source (ui_tick_rate_hz).
+  std::atomic<bool> ui_tick_force_requested_{false};
+  std::chrono::steady_clock::time_point ui_tick_last_paint_;
 #endif  // XE_PLATFORM
 };
 

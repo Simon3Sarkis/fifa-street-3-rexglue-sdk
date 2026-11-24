@@ -426,9 +426,12 @@ class PosixConditionBase {
       if (timeout == std::chrono::milliseconds::max()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       } else {
-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
-        auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
-        std::this_thread::sleep_for(sleep_time);
+        // Keep the sub-millisecond remainder: truncating it to whole milliseconds made every poll
+        // of a short (< 2 ms) wait a sleep_for(0), and the alertable waits call this in 1 ms slices,
+        // so a thread waiting on several objects (the audio worker) spun at ~70% of a core.
+        std::chrono::steady_clock::duration remaining = end_time - now;
+        std::this_thread::sleep_for(
+            std::min<std::chrono::steady_clock::duration>(remaining, std::chrono::milliseconds(1)));
       }
     }
   }
@@ -1118,8 +1121,9 @@ std::chrono::milliseconds ComputeAlertableWaitTimeout(
   if (deadline == std::chrono::steady_clock::time_point::max()) {
     return kAlertablePollSlice;
   }
-  auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-      deadline - std::chrono::steady_clock::now());
+  // Round up: a remainder under 1 ms truncated to 0 turned the last slice into a spin.
+  auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline -
+                                                                 std::chrono::steady_clock::now());
   if (remaining <= std::chrono::milliseconds::zero()) {
     return std::chrono::milliseconds::zero();
   }

@@ -29,6 +29,9 @@
 #include <ffx_api/ffx_upscale.h>
 #endif
 
+REXCVAR_DEFINE_INT32(ui_tick_rate_hz, 60, "UI/Presenter",
+                     "Non-Windows: at most this many UI-thread paints per second while UI drawers "
+                     "keep requesting repaints (0 = unlimited, the old behaviour)");
 REXCVAR_DEFINE_BOOL(dxgi_ui_tick_timer, false, "UI/Presenter",
                     "Drive UI ticks from a high-resolution timer at the display refresh rate "
                     "instead of IDXGIOutput::WaitForVBlank (which Wine emulates by polling)");
@@ -1808,6 +1811,23 @@ void Presenter::WaitForUITickFromUIThread() {
     }
     dxgi_ui_tick_signal_condition_.wait(dxgi_ui_tick_lock);
   }
+#else
+  // No vblank tick source here: without one, UI drawers that request a repaint after every paint
+  // (common) made the UI thread re-present as fast as the present mode allows - on the Steam Deck
+  // natively, ~half a core and GPU time taken from the emulation. Space UI paints by a display
+  // refresh period instead; guest output presents still force an immediate paint.
+  if (!AreUITicksNeededFromUIThread() || REXCVAR_GET(ui_tick_rate_hz) <= 0) {
+    return;
+  }
+  if (ui_tick_force_requested_.exchange(false, std::memory_order_relaxed)) {
+    return;
+  }
+  const auto period = std::chrono::microseconds(1000000 / REXCVAR_GET(ui_tick_rate_hz));
+  const auto now = std::chrono::steady_clock::now();
+  if (now - ui_tick_last_paint_ < period) {
+    std::this_thread::sleep_for(period - (now - ui_tick_last_paint_));
+  }
+  ui_tick_last_paint_ = std::chrono::steady_clock::now();
 #endif  // XE_PLATFORM
 }
 
@@ -1815,6 +1835,8 @@ void Presenter::ForceUIThreadPaintTick() {
 #if REX_PLATFORM_WIN32
   std::scoped_lock<std::mutex> dxgi_ui_tick_lock(dxgi_ui_tick_mutex_);
   dxgi_ui_tick_force_requested_ = true;
+#else
+  ui_tick_force_requested_.store(true, std::memory_order_relaxed);
 #endif  // XE_PLATFORM
 }
 

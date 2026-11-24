@@ -1247,6 +1247,11 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
     return false;
   }
 
+  // Dump the translated SPIR-V too (the common code only dumps the guest ucode).
+  if (!REXCVAR_GET(dump_shaders).empty()) {
+    translation.Dump(REXCVAR_GET(dump_shaders), "vulkan");
+  }
+
   // TODO(Triang3l): Log that the shader has been successfully translated in
   // common code.
 

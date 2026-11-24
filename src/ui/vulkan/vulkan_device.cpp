@@ -877,6 +877,13 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     if (memory_type_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) {
       device->memory_types_.host_cached |= memory_type_bit;
     }
+    // Logged so builds on different stacks (native vs Wine's Vulkan layer) can be compared: which
+    // memory type an allocation lands in decides where the GPU reads it from.
+    const uint32_t heap_index = memory_properties.memoryTypes[memory_type_index].heapIndex;
+    REXLOG_INFO("Vulkan memory type {}: flags 0x{:X}, heap {} ({} MB, flags 0x{:X})",
+                memory_type_index, uint32_t(memory_type_flags), heap_index,
+                memory_properties.memoryHeaps[heap_index].size >> 20,
+                uint32_t(memory_properties.memoryHeaps[heap_index].flags));
   }
 
   return device;

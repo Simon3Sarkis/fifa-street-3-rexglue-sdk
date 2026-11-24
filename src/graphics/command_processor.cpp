@@ -47,7 +47,7 @@ REXCVAR_DEFINE_INT32(wait_reg_mem_spin_us, 2000, "GPU",
                      "WAIT_REG_MEM: poll with yields for this long before sleeping between polls "
                      "(0 = always sleep, the old behaviour)");
 REXCVAR_DEFINE_INT32(wait_reg_mem_spin_wine_us, 0, "GPU",
-                     "wait_reg_mem_spin_us to use when running under Wine / Proton (0 = the same). "
+                     "wait_reg_mem_spin_us to use under Wine / Proton and on Linux (0 = the same). "
                      "On the Steam Deck a long spin keeps the CPU clock up; on native Windows with "
                      "NVIDIA a long spin made vkQueueSubmit block (40 FPS instead of 60)");
 REXCVAR_DEFINE_BOOL(wait_reg_mem_spin_wine_adaptive, false, "GPU",
@@ -1294,7 +1294,9 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
       // Sleeping (>= 1 ms per poll) left the GPU idle ~1.35 ms per wait; FIFA Street 3 makes ~5
       // such waits a frame. Poll with yields for wait_reg_mem_spin_us, then fall back to sleeping
       // so long waits don't burn a core.
-      static const bool under_wine = rex::thread::IsRunningUnderWine();
+      // The Steam Deck runs either the Windows build under Proton or the native Linux build; both
+      // need the long spin there (the CPU clocks cores by activity). Native Windows doesn't.
+      static const bool under_wine = rex::thread::IsRunningUnderWine() || REX_PLATFORM_LINUX;
       const bool wine_long_spin =
           under_wine && REXCVAR_GET(wait_reg_mem_spin_wine_us) > 0 &&
           (!REXCVAR_GET(wait_reg_mem_spin_wine_adaptive) || wait_start < spin_boost_until_);
