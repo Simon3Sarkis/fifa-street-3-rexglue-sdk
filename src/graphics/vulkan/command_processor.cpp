@@ -130,6 +130,9 @@ REXCVAR_DEFINE_BOOL(vulkan_memexport_barrier_elision, false, "GPU/Vulkan",
                     "insert a shared memory barrier only on a real hazard instead of around every "
                     "memexport draw (each such barrier ends the render pass)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_INT32(debug_log_barrier_pass_ends_remaining, 0, "GPU/Debug",
+                     "Log this many render pass ends caused by barriers other than shared memory "
+                     "ones (buffers, image layouts and access masks)");
 REXCVAR_DEFINE_INT32(debug_log_memexport_remaining, 0, "GPU/Debug",
                      "Log this many memexport-capable draws (shaders, destination ranges, whether "
                      "a render pass is open)");
@@ -3538,6 +3541,22 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
     }
     ++(shared_memory_only ? gpu_profile_pass_ends_shared_memory_
                           : gpu_profile_pass_ends_other_barriers_);
+    const int32_t log_remaining = REXCVAR_GET(debug_log_barrier_pass_ends_remaining);
+    if (log_remaining > 0 && !shared_memory_only) {
+      REXCVAR_SET(debug_log_barrier_pass_ends_remaining, log_remaining - 1);
+      std::string what;
+      for (const VkBufferMemoryBarrier& b : pending_barriers_buffer_memory_barriers_) {
+        what += fmt::format(" buf{}[{:X}+{:X} {:X}->{:X}]",
+                            b.buffer == shared_memory_->buffer() ? "(shmem)" : "", b.offset,
+                            b.size, uint32_t(b.srcAccessMask), uint32_t(b.dstAccessMask));
+      }
+      for (const VkImageMemoryBarrier& b : pending_barriers_image_memory_barriers_) {
+        what += fmt::format(" img[{:X} layout {}->{} access {:X}->{:X}]",
+                            uint64_t(b.image), int(b.oldLayout), int(b.newLayout),
+                            uint32_t(b.srcAccessMask), uint32_t(b.dstAccessMask));
+      }
+      REXGPU_INFO("[barrier pass end] frame={}{}", frame_current_, what);
+    }
   }
   EndRenderPass();
   for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend(); ++it) {
