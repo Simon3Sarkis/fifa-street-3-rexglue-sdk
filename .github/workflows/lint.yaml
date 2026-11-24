@@ -4,6 +4,8 @@ on: [pull_request, push]
 
 jobs:
   format-check:
+    # Not in the FIFA Street 3 fork: upstream files there predate this check and fail it.
+    if: github.repository != 'Simon3Sarkis/fifa-street-3-rexglue-sdk'
     name: Format Check
     runs-on: ubuntu-latest
 

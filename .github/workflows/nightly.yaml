@@ -17,6 +17,8 @@ env:
 
 jobs:
   check:
+    # Not in the FIFA Street 3 fork: it has no development branch to build nightlies from.
+    if: github.repository != 'Simon3Sarkis/fifa-street-3-rexglue-sdk'
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.compare.outputs.should_build }}
