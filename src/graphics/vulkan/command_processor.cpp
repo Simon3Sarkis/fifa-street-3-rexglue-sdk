@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <cstdlib>
 #include <optional>
 #include <array>
 #include <atomic>
@@ -116,6 +117,14 @@ REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
                     "Submit command buffer when PM4 primary buffer ends")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_STRING(debug_skip_draws_ps, "", "GPU/Debug",
+                      "Comma-separated pixel shader ucode hashes (hex) whose draws are skipped, to "
+                      "find which draws produce an effect. Debug only: breaks the picture.");
+REXCVAR_DEFINE_STRING(debug_log_draws_ps, "", "GPU/Debug",
+                      "Comma-separated pixel shader ucode hashes (hex, or * for all) whose draws log "
+                      "their render-backend state (targets, formats, depth/stencil, blend)");
+REXCVAR_DEFINE_INT32(debug_log_draws_remaining, 0, "GPU/Debug",
+                     "How many draw-state lines debug_log_draws_ps may still write");
 REXCVAR_DEFINE_BOOL(vulkan_gpu_timestamp_per_draw, false, "GPU/Vulkan",
                     "While vulkan_gpu_timestamp_trace_frames is active, time every draw on its own "
                     "(instead of merging consecutive draws of a bucket) and label it with its vertex "
@@ -4061,6 +4070,33 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
   return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
 }
 
+
+namespace {
+// Parses a comma-separated list of hex hashes (cached per distinct setting string).
+bool HashInList(const std::string& list, uint64_t hash) {
+  if (list.empty()) {
+    return false;
+  }
+  if (list == "*") {
+    return true;
+  }
+  size_t start = 0;
+  while (start <= list.size()) {
+    size_t end = list.find(',', start);
+    if (end == std::string::npos) {
+      end = list.size();
+    }
+    std::string item = list.substr(start, end - start);
+    item.erase(0, item.find_first_not_of(" "));
+    if (!item.empty() && std::strtoull(item.c_str(), nullptr, 16) == hash) {
+      return true;
+    }
+    start = end + 1;
+  }
+  return false;
+}
+}  // namespace
+
 bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                                        IndexBufferInfo* index_buffer_info,
                                        bool major_mode_explicit) {
@@ -4191,6 +4227,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     }
     return true;
   }
+
   VulkanShader* pixel_shader = nullptr;
   if (is_rasterization_done) {
     // See xenos::EdramMode for explanation why the pixel shader is only used
@@ -4477,6 +4514,32 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       ++debug_frame_no_effect_draws_;
     }
     return true;
+  }
+
+  {
+    const uint64_t debug_ps_hash = pixel_shader ? pixel_shader->ucode_data_hash() : 0;
+    const std::string& log_list = REXCVAR_GET(debug_log_draws_ps);
+    const int32_t log_remaining = REXCVAR_GET(debug_log_draws_remaining);
+    if (log_remaining > 0 && HashInList(log_list, debug_ps_hash)) {
+      REXCVAR_SET(debug_log_draws_remaining, log_remaining - 1);
+      const uint32_t* r = register_file_->values;
+      REXGPU_INFO(
+          "[draw state] frame={} vs={:016X} ps={:016X} prim={} idx={} | SURFACE_INFO={:08X} "
+          "COLOR_INFO={:08X},{:08X},{:08X},{:08X} DEPTH_INFO={:08X} MODECONTROL={:08X} "
+          "COLOR_MASK={:08X} COLORCONTROL={:08X} DEPTHCONTROL={:08X} STENCILREFMASK={:08X} "
+          "STENCILREFMASK_BF={:08X} BLEND0={:08X} BLEND1={:08X} WINDOW_OFFSET={:08X} norm_mask={:X}",
+          frame_current_, vertex_shader->ucode_data_hash(), debug_ps_hash, uint32_t(prim_type),
+          index_count, r[XE_GPU_REG_RB_SURFACE_INFO], r[XE_GPU_REG_RB_COLOR_INFO],
+          r[XE_GPU_REG_RB_COLOR1_INFO], r[XE_GPU_REG_RB_COLOR2_INFO], r[XE_GPU_REG_RB_COLOR3_INFO],
+          r[XE_GPU_REG_RB_DEPTH_INFO], r[XE_GPU_REG_RB_MODECONTROL], r[XE_GPU_REG_RB_COLOR_MASK],
+          r[XE_GPU_REG_RB_COLORCONTROL], r[XE_GPU_REG_RB_DEPTHCONTROL],
+          r[XE_GPU_REG_RB_STENCILREFMASK], r[XE_GPU_REG_RB_STENCILREFMASK_BF],
+          r[XE_GPU_REG_RB_BLENDCONTROL0], r[XE_GPU_REG_RB_BLENDCONTROL1],
+          r[XE_GPU_REG_PA_SC_WINDOW_OFFSET], normalized_color_mask);
+    }
+    if (HashInList(REXCVAR_GET(debug_skip_draws_ps), debug_ps_hash)) {
+      return true;
+    }
   }
 
   // Update the textures before most other work in the submission because
