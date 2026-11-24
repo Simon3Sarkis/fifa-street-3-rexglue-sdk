@@ -115,6 +115,10 @@ REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
                     "Submit command buffer when PM4 primary buffer ends")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(vulkan_gpu_timestamp_per_draw, false, "GPU/Vulkan",
+                    "While vulkan_gpu_timestamp_trace_frames is active, time every draw on its own "
+                    "(instead of merging consecutive draws of a bucket) and label it with its vertex "
+                    "and pixel shader hashes, to find the most expensive draws");
 REXCVAR_DEFINE_INT32(vulkan_gpu_timestamp_trace_frames, 0, "GPU/Vulkan",
                      "Log every GPU timestamp bucket interval (start/end/duration) for this many "
                      "frames, for auditing the time attribution")
@@ -4922,7 +4926,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   pre_draw_stage_timer.Stop();
 
   // Draw.
-  uint32_t gpu_timestamp_start = BeginGpuTimestampedDraw(draw_bucket);
+  uint32_t gpu_timestamp_start = BeginGpuTimestampedDraw(
+      draw_bucket, vertex_shader->ucode_data_hash(),
+      pixel_shader != nullptr ? pixel_shader->ucode_data_hash() : 0, host_draw_vertex_count);
   if (primitive_processing_result.index_buffer_type ==
           PrimitiveProcessor::ProcessedIndexBufferType::kNone ||
       shader_32bit_index_dma) {
@@ -6134,6 +6140,9 @@ void VulkanCommandProcessor::BeginGpuTimestampFrame() {
   frame.buckets.clear();
   frame.bucket_start_queries.clear();
   frame.bucket_end_queries.clear();
+  frame.bucket_vs.clear();
+  frame.bucket_ps.clear();
+  frame.bucket_vertices.clear();
 
   // The frame-level start/end pair is measured only while a visible overlay or
   // explicit timestamp diagnostic needs it.
@@ -6319,10 +6328,13 @@ void VulkanCommandProcessor::ProcessGpuTimestampResults() {
       }
       int64_t elapsed_us = timestamp_delta_us(start_query, end_query);
       if (trace_this_frame && start_query < frame.query_count && end_query < frame.query_count) {
-        REXGPU_INFO("  [{}] {} start={} end={} dur={}{}", i,
+        REXGPU_INFO("  [{}] {} start={} end={} dur={} vs={:016X} ps={:016X} verts={}{}", i,
                     rex::perf::DrawBucketName(frame.buckets[i]),
                     trace_ticks_to_us(timestamps[size_t(start_query) * 2]),
                     trace_ticks_to_us(timestamps[size_t(end_query) * 2]), elapsed_us,
+                    i < frame.bucket_vs.size() ? frame.bucket_vs[i] : 0,
+                    i < frame.bucket_ps.size() ? frame.bucket_ps[i] : 0,
+                    i < frame.bucket_vertices.size() ? frame.bucket_vertices[i] : 0,
                     (!timestamps[size_t(start_query) * 2 + 1] ||
                      !timestamps[size_t(end_query) * 2 + 1])
                         ? " UNAVAILABLE"
@@ -6434,10 +6446,17 @@ void VulkanCommandProcessor::ProcessGpuTimestampResults() {
     frame.buckets.clear();
     frame.bucket_start_queries.clear();
     frame.bucket_end_queries.clear();
+    frame.bucket_vs.clear();
+    frame.bucket_ps.clear();
+    frame.bucket_vertices.clear();
   }
 }
 
-uint32_t VulkanCommandProcessor::BeginGpuTimestampedDraw(rex::perf::DrawBucket bucket) {
+uint32_t VulkanCommandProcessor::BeginGpuTimestampedDraw(rex::perf::DrawBucket bucket,
+                                                         uint64_t vs_hash, uint64_t ps_hash,
+                                                         uint32_t vertices) {
+  const bool per_draw = REXCVAR_GET(vulkan_gpu_timestamp_per_draw) &&
+                        REXCVAR_GET(vulkan_gpu_timestamp_trace_frames) > 0;
   if (!gpu_timestamp_resources_available_ || gpu_timestamp_query_pool_ == VK_NULL_HANDLE ||
       !gpu_timestamp_draws_enabled_ || !frame_open_) {
     return UINT32_MAX;
@@ -6447,7 +6466,7 @@ uint32_t VulkanCommandProcessor::BeginGpuTimestampedDraw(rex::perf::DrawBucket b
   if (frame.frame != frame_current_) {
     return UINT32_MAX;
   }
-  if (frame.active_bucket_valid && frame.active_bucket == bucket) {
+  if (frame.active_bucket_valid && frame.active_bucket == bucket && !per_draw) {
     return UINT32_MAX;
   }
   if (frame.query_count + (frame.active_bucket_valid ? 2 : 1) >
@@ -6471,6 +6490,9 @@ uint32_t VulkanCommandProcessor::BeginGpuTimestampedDraw(rex::perf::DrawBucket b
   frame.buckets.push_back(bucket);
   frame.bucket_start_queries.push_back(start_query);
   frame.bucket_end_queries.push_back(UINT32_MAX);
+  frame.bucket_vs.push_back(per_draw ? vs_hash : 0);
+  frame.bucket_ps.push_back(per_draw ? ps_hash : 0);
+  frame.bucket_vertices.push_back(per_draw ? vertices : 0);
   deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                                gpu_timestamp_query_pool_,
                                                frame.query_base + start_query);

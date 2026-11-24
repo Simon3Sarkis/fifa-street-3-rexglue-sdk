@@ -459,7 +459,9 @@ class VulkanCommandProcessor : public CommandProcessor {
   void EndGpuTimestampFrame();
   void ResolveGpuTimestampFrame(VkCommandBuffer command_buffer);
   void ProcessGpuTimestampResults();
-  uint32_t BeginGpuTimestampedDraw(rex::perf::DrawBucket bucket);
+  // vs/ps/vertices label the interval in per-draw traces (vulkan_gpu_timestamp_per_draw).
+  uint32_t BeginGpuTimestampedDraw(rex::perf::DrawBucket bucket, uint64_t vs_hash = 0,
+                                   uint64_t ps_hash = 0, uint32_t vertices = 0);
   void EndGpuTimestampedDraw(uint32_t start_query);
   void InvalidateAllVertexBufferResidency();
   void InvalidateVertexBufferResidency(uint32_t vfetch_index);
@@ -811,7 +813,8 @@ class VulkanCommandProcessor : public CommandProcessor {
 #if REX_PLATFORM_MAC
   static constexpr uint32_t kMaxGpuTimestampQueriesPerFrame = 1024;
 #else
-  static constexpr uint32_t kMaxGpuTimestampQueriesPerFrame = 4096;
+  // 16384: per-draw tracing (vulkan_gpu_timestamp_per_draw) of ~2,000-draw frames needs ~4,100.
+  static constexpr uint32_t kMaxGpuTimestampQueriesPerFrame = 16384;
 #endif
   VkQueryPool gpu_timestamp_query_pool_ = VK_NULL_HANDLE;
   VkBuffer gpu_timestamp_readback_buffer_ = VK_NULL_HANDLE;
@@ -838,6 +841,10 @@ class VulkanCommandProcessor : public CommandProcessor {
     std::vector<rex::perf::DrawBucket> buckets;
     std::vector<uint32_t> bucket_start_queries;
     std::vector<uint32_t> bucket_end_queries;
+    // Per-draw trace labels, parallel to buckets (0 when not tracing per draw).
+    std::vector<uint64_t> bucket_vs;
+    std::vector<uint64_t> bucket_ps;
+    std::vector<uint32_t> bucket_vertices;
   };
   std::array<GpuTimestampFrame, kMaxFramesInFlight> gpu_timestamp_frames_;
   // Averaged full-frame GPU time attribution, logged periodically when bucket
