@@ -79,6 +79,11 @@ class SDLAudioDriver : public AudioDriver {
   uint32_t stats_callbacks_ = 0;
   uint32_t stats_frames_ = 0;
   uint32_t stats_silence_chunks_ = 0;
+  // audio_stats: guest frames that arrived all-zero right after a non-silent one (silence produced
+  // upstream - by the guest mixer / decoder - as opposed to an output underrun).
+  uint32_t stats_guest_zero_frames_ = 0;
+  uint32_t stats_guest_zero_logged_ = 0;
+  bool stats_prev_frame_silent_ = true;
   size_t stats_queue_min_ = SIZE_MAX;
   size_t stats_queue_max_ = 0;
 };

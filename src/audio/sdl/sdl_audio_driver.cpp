@@ -27,6 +27,10 @@
 #include <SDL3/SDL.h>
 
 REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
+REXCVAR_DEFINE_BOOL(audio_force_stereo, false, "Audio",
+                    "Always fold the guest's 5.1 mix to stereo here (ITU/Dolby Lo/Ro weights, LFE "
+                    "dropped), even if the output reports more channels; off = pass 5.1 through to "
+                    "multichannel outputs");
 
 REXCVAR_DEFINE_BOOL(audio_realtime_credit_pacing, true, "Audio",
                     "Limit the rate at which consumed audio frames release guest submission "
@@ -114,7 +118,11 @@ bool SDLAudioDriver::Initialize() {
 
   // A 1-channel device gets the stereo fold too, then SDL collapses to mono.
   // Handing it a 6ch stream instead would use SDL's own downmix.
-  if (obtained_spec.channels <= 2) {
+  // audio_force_stereo: fold to stereo here even when the endpoint reports more channels. PipeWire
+  // reports a docked Steam Deck's stereo HDMI sink as 6 ch; the 5.1 passthrough then left the
+  // downmix to PipeWire, which folds the LFE in and doesn't normalise (~5 dB hotter than the
+  // standard fold, clipping, bass-heavy - measured against the Proton build).
+  if (obtained_spec.channels <= 2 || REXCVAR_GET(audio_force_stereo)) {
     SDL_DestroyAudioStream(sdl_stream_);
     sdl_stream_ = nullptr;
     desired_spec.channels = 2;
@@ -285,6 +293,27 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
       }
     }
 
+    if (buffer && stats_enabled) {
+      // Is this guest frame digital silence (all six channels exactly zero)?
+      const size_t bytes = size_t(driver->channel_samples_) * driver->frame_channels_ * sizeof(float);
+      const uint8_t* p = reinterpret_cast<const uint8_t*>(buffer);
+      bool silent = true;
+      for (size_t i = 0; i < bytes; ++i) {
+        if (p[i]) {
+          silent = false;
+          break;
+        }
+      }
+      if (silent && !driver->stats_prev_frame_silent_) {
+        driver->stats_guest_zero_frames_++;
+        if (driver->stats_guest_zero_logged_ < 20) {
+          driver->stats_guest_zero_logged_++;
+          REXAPU_INFO("Audio: guest frame all-zero after sound (t={} ms)", AudioNowNs() / 1000000);
+        }
+      }
+      driver->stats_prev_frame_silent_ = silent;
+    }
+
     if (!buffer) {
       if (sdl_callback_count < 10) {
         REXAPU_DEBUG("SDLCallback: no frames queued (silence)");
@@ -343,13 +372,15 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
       REXAPU_INFO(
           "Audio stats ({:.1f}s): callbacks={} frames={} ({:.1f}/s, real-time={:.1f}/s) "
           "silence_chunks={} queue_depth={}..{} deferred_credits={} allowance={:.1f} "
-          "max_callback_gap={}ms",
+          "max_callback_gap={}ms guest_zero_frames={}",
           window_s, driver->stats_callbacks_, driver->stats_frames_,
           double(driver->stats_frames_) / window_s,
           double(frame_frequency_) / double(channel_samples_), driver->stats_silence_chunks_,
           driver->stats_queue_min_ == SIZE_MAX ? 0 : driver->stats_queue_min_,
           driver->stats_queue_max_, driver->pace_deferred_credits_,
-          driver->pace_allowance_frames_, driver->stats_max_callback_gap_ns_ / 1000000ull);
+          driver->pace_allowance_frames_, driver->stats_max_callback_gap_ns_ / 1000000ull,
+          driver->stats_guest_zero_frames_);
+      driver->stats_guest_zero_frames_ = 0;
       driver->stats_window_start_ns_ = now_ns;
       driver->stats_callbacks_ = 0;
       driver->stats_frames_ = 0;
