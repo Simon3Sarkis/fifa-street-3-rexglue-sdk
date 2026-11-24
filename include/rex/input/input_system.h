@@ -47,6 +47,10 @@ class InputSystem : public system::IInputSystem {
   void SetScriptSnapCallback(InputScript::SnapCallback callback) {
     if (script_) script_->SetSnapCallback(std::move(callback));
   }
+  /// Hook for the script's waitpixel / pressuntil (no-op without a script).
+  void SetScriptPixelProbe(InputScript::PixelProbe probe) {
+    if (script_) script_->SetPixelProbe(std::move(probe));
+  }
 
   /// Replaces any previous assignment. Call before the guest starts polling.
   void SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment);

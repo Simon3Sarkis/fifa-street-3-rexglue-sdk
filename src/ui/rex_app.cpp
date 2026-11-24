@@ -648,6 +648,26 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
     });
   }
 
+  // Input-script waitpixel / pressuntil: read one pixel of the game's output frame. Coordinates are
+  // given for 1280x720 and scaled to the real output size.
+  if (auto* input_sys = static_cast<rex::input::InputSystem*>(runtime_->input_system())) {
+    input_sys->SetScriptPixelProbe([this](float x, float y, uint8_t rgb[3]) {
+      auto* graphics = runtime_ ? runtime_->graphics_system() : nullptr;
+      auto* presenter = graphics ? graphics->presenter() : nullptr;
+      ui::RawImage image;
+      if (!presenter || !presenter->CaptureGuestOutput(image) || !image.width || !image.height) {
+        return false;
+      }
+      const uint32_t px = std::min(image.width - 1, uint32_t(x * image.width / 1280.0f));
+      const uint32_t py = std::min(image.height - 1, uint32_t(y * image.height / 720.0f));
+      const uint8_t* p = image.data.data() + size_t(py) * image.stride + size_t(px) * 4;
+      rgb[0] = p[0];
+      rgb[1] = p[1];
+      rgb[2] = p[2];
+      return true;
+    });
+  }
+
   std::string xex_image = "game:\\default.xex";
   OnLoadXexImage(xex_image);
 

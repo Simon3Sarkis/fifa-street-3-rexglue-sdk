@@ -19,6 +19,13 @@
  *   trigger L|R v ms      trigger at v in 0..1 for ms
  *   user N                following events go to guest user N (0-3, default 0)
  *   log text...           writes "input_script: text" to the log at that time
+ *   waitpixel X Y R G B tol ms
+ *                         holds the script until the game's output pixel X,Y (in 1280x720 coordinates,
+ *                         scaled to the real output) is within tol of R,G,B, or ms pass; every later
+ *                         event shifts by the time waited
+ *   pressuntil B period X Y R G B tol ms
+ *                         like waitpixel, pressing buttons B every period ms while waiting (e.g. START
+ *                         until the main menu shows: can't miss the title or overshoot the menu)
  *   snap name             saves the game's output frame as <input_script_snap_dir>/<name>.bmp
  *                         (from the presenter, so other windows can't cover it)
  *   set name value        changes a setting at that time (rex::cvar::SetFlagByName), e.g. to turn
@@ -55,8 +62,13 @@ class InputScript {
   using SnapCallback = std::function<void(const std::string& name)>;
   void SetSnapCallback(SnapCallback callback) { snap_callback_ = std::move(callback); }
 
+  /// Reads the game's output pixel at (x, y) in 1280x720 coordinates (scaled to the real output) into
+  /// rgb; false if no frame is available. Set by the app; called outside the script's lock.
+  using PixelProbe = std::function<bool(float x, float y, uint8_t rgb[3])>;
+  void SetPixelProbe(PixelProbe probe) { pixel_probe_ = std::move(probe); }
+
  private:
-  enum class Kind { kButtons, kStick, kTrigger, kLog, kSet, kSnap, kQuit };
+  enum class Kind { kButtons, kStick, kTrigger, kLog, kSet, kSnap, kWait, kQuit };
   struct Event {
     int64_t start_ms = 0;
     int64_t end_ms = 0;
@@ -67,16 +79,29 @@ class InputScript {
     float x = 0, y = 0;
     std::string text;
     std::string value;
+    // waitpixel / pressuntil
+    uint8_t rgb[3] = {};
+    int tolerance = 0;
+    int64_t timeout_ms = 0;
+    int64_t period_ms = 0;
     int line = 0;
     bool started = false;
   };
 
   InputScript() = default;
-  uint32_t ApplyLocked(uint32_t user_index, X_INPUT_GAMEPAD& pad, std::vector<std::string>& snaps);
+  uint32_t ApplyLocked(uint32_t user_index, X_INPUT_GAMEPAD& pad, std::vector<std::string>& snaps,
+                       int& probe_event);
   int64_t NowMs() const;
 
   std::vector<Event> events_;
   SnapCallback snap_callback_;
+  PixelProbe pixel_probe_;
+  // Script time = NowMs() - offset_ms_; waits grow the offset so later events shift.
+  int64_t offset_ms_ = 0;
+  int active_wait_ = -1;
+  int64_t wait_begin_ms_ = 0;
+  int64_t last_probe_ms_ = 0;
+  bool probe_matched_ = false;
   int64_t epoch_ms_ = 0;
   std::mutex mutex_;
   struct UserState {

@@ -178,6 +178,25 @@ std::unique_ptr<InputScript> InputScript::Load(const std::filesystem::path& path
         ev.text = "snap_" + std::to_string(time);
       }
       ev.end_ms = time;
+    } else if (cmd == "WAITPIXEL" || cmd == "PRESSUNTIL") {
+      ev.kind = Kind::kWait;
+      if (cmd == "PRESSUNTIL") {
+        std::string spec;
+        if (!(ss >> spec >> ev.period_ms) || !ParseButtons(spec, ev.buttons) || ev.period_ms < 200) {
+          bad("pressuntil needs buttons and a period of at least 200 ms");
+          continue;
+        }
+      }
+      int r = 0, g = 0, b = 0;
+      if (!(ss >> ev.x >> ev.y >> r >> g >> b >> ev.tolerance >> ev.timeout_ms) ||
+          ev.timeout_ms <= 0) {
+        bad("needs X Y R G B tolerance timeout_ms");
+        continue;
+      }
+      ev.rgb[0] = uint8_t(std::clamp(r, 0, 255));
+      ev.rgb[1] = uint8_t(std::clamp(g, 0, 255));
+      ev.rgb[2] = uint8_t(std::clamp(b, 0, 255));
+      ev.end_ms = time;
     } else if (cmd == "QUIT") {
       ev.kind = Kind::kQuit;
       ev.end_ms = time;
@@ -211,7 +230,25 @@ bool InputScript::HasUser(uint32_t user_index) const {
 
 uint32_t InputScript::Apply(uint32_t user_index, X_INPUT_GAMEPAD& pad) {
   std::vector<std::string> snaps;
-  const uint32_t changes = ApplyLocked(user_index, pad, snaps);
+  int probe_event = -1;
+  const uint32_t changes = ApplyLocked(user_index, pad, snaps, probe_event);
+  // A waitpixel/pressuntil asked for a probe: read the pixel without holding the lock.
+  if (probe_event >= 0) {
+    uint8_t rgb[3] = {};
+    const Event& ev = events_[probe_event];
+    const bool got = pixel_probe_ && pixel_probe_(ev.x, ev.y, rgb);
+    const bool matched = got && std::abs(int(rgb[0]) - ev.rgb[0]) <= ev.tolerance &&
+                         std::abs(int(rgb[1]) - ev.rgb[1]) <= ev.tolerance &&
+                         std::abs(int(rgb[2]) - ev.rgb[2]) <= ev.tolerance;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (active_wait_ == probe_event) {
+      probe_matched_ = matched;
+      if (!pixel_probe_) {
+        REXSYS_WARN("input_script: line {}: no pixel probe installed, the wait will time out",
+                    ev.line);
+      }
+    }
+  }
   // Captures read back a GPU image; do them without holding the script lock.
   for (const auto& name : snaps) {
     if (name == kQuitMarker) {
@@ -228,16 +265,62 @@ uint32_t InputScript::Apply(uint32_t user_index, X_INPUT_GAMEPAD& pad) {
 }
 
 uint32_t InputScript::ApplyLocked(uint32_t user_index, X_INPUT_GAMEPAD& pad,
-                                  std::vector<std::string>& snaps) {
+                                  std::vector<std::string>& snaps, int& probe_event) {
   std::lock_guard<std::mutex> lock(mutex_);
-  const int64_t now = NowMs();
+  const int64_t real = NowMs();
+  int64_t now = real - offset_ms_;
   uint16_t buttons = 0;
   bool lstick = false, rstick = false, ltrig = false, rtrig = false;
   int16_t lx = 0, ly = 0, rx = 0, ry = 0;
   uint8_t lt = 0, rt = 0;
+  size_t limit = events_.size();
 
-  for (auto& ev : events_) {
+  // An active wait freezes script time at its start until the pixel matches or it times out.
+  auto run_wait = [&](int index) {
+    const Event& w = events_[index];
+    const int64_t waited = real - wait_begin_ms_;
+    if (probe_matched_ || waited >= w.timeout_ms) {
+      REXSYS_INFO("input_script: t={} ms (line {}): wait {} after {} ms", real, w.line,
+                  probe_matched_ ? "matched" : "TIMED OUT", waited);
+      active_wait_ = -1;
+      probe_matched_ = false;
+      return false;
+    }
+    offset_ms_ = real - w.start_ms;
+    now = w.start_ms;
+    limit = size_t(index);
+    if (w.period_ms > 0 && w.user == user_index && (waited % w.period_ms) < 150) {
+      buttons |= w.buttons;
+    }
+    if (real - last_probe_ms_ >= 250) {
+      last_probe_ms_ = real;
+      probe_event = index;
+    }
+    return true;
+  };
+  if (active_wait_ >= 0) {
+    run_wait(active_wait_);
+  }
+
+  for (size_t i = 0; i < limit; ++i) {
+    auto& ev = events_[i];
     if (ev.start_ms > now) continue;
+    if (ev.kind == Kind::kWait) {
+      if (!ev.started) {
+        ev.started = true;
+        active_wait_ = int(i);
+        wait_begin_ms_ = real;
+        last_probe_ms_ = 0;
+        probe_matched_ = false;
+        REXSYS_INFO("input_script: t={} ms (line {}): {} for pixel {},{} ~ {},{},{} (tol {}, up to {} ms)",
+                    real, ev.line, ev.period_ms ? "press-until" : "wait", ev.x, ev.y, ev.rgb[0],
+                    ev.rgb[1], ev.rgb[2], ev.tolerance, ev.timeout_ms);
+        if (run_wait(int(i))) {
+          break;
+        }
+      }
+      continue;
+    }
     // Log and quit fire once, whatever user is polling; the others apply to their user.
     if (!ev.started) {
       ev.started = true;
@@ -252,7 +335,7 @@ uint32_t InputScript::ApplyLocked(uint32_t user_index, X_INPUT_GAMEPAD& pad,
           break;
         }
         case Kind::kSnap:
-          REXSYS_INFO("input_script: t={} ms (line {}): snap {}", now, ev.line, ev.text);
+          REXSYS_INFO("input_script: t={} ms (line {}): snap {}", real, ev.line, ev.text);
           snaps.push_back(ev.text);
           break;
         case Kind::kQuit:
