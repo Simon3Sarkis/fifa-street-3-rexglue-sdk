@@ -14,6 +14,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <thread>
 #include <utility>
 
 #include <rex/assert.h>
@@ -27,6 +28,10 @@
 #include <ffx_api/ffx_api.h>
 #include <ffx_api/ffx_upscale.h>
 #endif
+
+REXCVAR_DEFINE_BOOL(dxgi_ui_tick_limit, true, "UI/Presenter",
+                    "Keep DXGI vertical-blank UI ticks at least 90% of a refresh period apart "
+                    "(Wine returns from WaitForVBlank early)");
 
 REXCVAR_DEFINE_BOOL(host_present_from_non_ui_thread, true, "UI/Presenter",
                     "Allow presentation from non-UI thread");
@@ -1847,6 +1852,39 @@ void Presenter::DXGIUITickThread() {
       Microsoft::WRL::ComPtr<IDXGIOutput> dxgi_output = dxgi_ui_tick_output_;
       dxgi_ui_tick_lock.unlock();
       wait_succeeded = SUCCEEDED(dxgi_ui_tick_output_->WaitForVBlank());
+      // Some implementations return early instead of blocking until the vertical blank (Wine /
+      // Proton on the Steam Deck: this loop kept a thread busy and woke the UI thread far more often
+      // than the display refreshes). Keep ticks at least 90% of a refresh period apart; a real
+      // blocking wait already is, so it's unaffected.
+      static thread_local std::chrono::steady_clock::time_point last_tick;
+      const auto now = std::chrono::steady_clock::now();
+      const auto waited = now - last_tick;
+      last_tick = now;
+      if (wait_succeeded && REXCVAR_GET(dxgi_ui_tick_limit)) {
+        // The display's refresh rate, re-read every ~2 s (the query itself isn't free under Wine).
+        static thread_local int refresh_hz = 0;
+        static thread_local std::chrono::steady_clock::time_point refresh_read;
+        if (!refresh_hz || now - refresh_read > std::chrono::seconds(2)) {
+          refresh_read = now;
+          refresh_hz = 60;
+          DXGI_OUTPUT_DESC desc;
+          MONITORINFOEXW monitor_info = {};
+          monitor_info.cbSize = sizeof(monitor_info);
+          DEVMODEW mode = {};
+          mode.dmSize = sizeof(mode);
+          if (SUCCEEDED(dxgi_output->GetDesc(&desc)) &&
+              GetMonitorInfoW(desc.Monitor, &monitor_info) &&
+              EnumDisplaySettingsW(monitor_info.szDevice, ENUM_CURRENT_SETTINGS, &mode) &&
+              mode.dmDisplayFrequency >= 24 && mode.dmDisplayFrequency <= 500) {
+            refresh_hz = int(mode.dmDisplayFrequency);
+          }
+        }
+        const auto min_interval = std::chrono::microseconds(900000 / refresh_hz);
+        if (waited < min_interval) {
+          std::this_thread::sleep_for(min_interval - waited);
+          last_tick = std::chrono::steady_clock::now();
+        }
+      }
     }
     dxgi_ui_tick_lock.lock();
     if (wait_succeeded) {
