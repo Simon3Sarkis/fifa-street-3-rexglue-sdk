@@ -91,6 +91,78 @@ inline float ppc_vrsqrtefp(float value) {
   return std::bit_cast<float>(ppc_vrsqrtefp_bits(std::bit_cast<uint32_t>(value)));
 }
 
+#if defined(__AVX2__)
+// Branch-free 4-lane version of ppc_vrsqrtefp_bits. Verified bit-identical to the scalar version
+// over all 2^32 inputs (and ~2x faster). Special inputs are blended in, in the scalar's priority order.
+inline simde__m128i ppc_vrsqrtefp_bits_v(simde__m128i bits) {
+  static constexpr int32_t table[32] = {
+      0x0568B4FD, 0x04F3AF97, 0x048DAAA5, 0x0435A618, 0x03E7A1E4, 0x03A29DFE,
+      0x03659A5C, 0x032E96F8, 0x02FC93CA, 0x02D090CE, 0x02A88DFE, 0x02838B57,
+      0x026188D4, 0x02438673, 0x02268431, 0x020B820B, 0x03D27FFA, 0x03807C29,
+      0x033878AA, 0x02F97572, 0x02C27279, 0x02926FB7, 0x02666D26, 0x023F6AC0,
+      0x021D6881, 0x01FD6665, 0x01E16468, 0x01C76287, 0x01AF60C1, 0x01995F12,
+      0x01855D79, 0x01735BF4,
+  };
+  const simde__m128i zero = simde_mm_setzero_si128();
+  simde__m128i exp = simde_mm_and_si128(simde_mm_srli_epi32(bits, 23), simde_mm_set1_epi32(0xFF));
+  simde__m128i mant = simde_mm_and_si128(bits, simde_mm_set1_epi32(0x007FFFFF));
+  // index = ((exp & 1) << 4) | (mant >> 19)   (same as the scalar's unbiased-exponent form)
+  simde__m128i index =
+      simde_mm_or_si128(simde_mm_slli_epi32(simde_mm_and_si128(exp, simde_mm_set1_epi32(1)), 4),
+                        simde_mm_srli_epi32(mant, 19));
+  simde__m128i interp = simde_mm_and_si128(simde_mm_srli_epi32(mant, 9), simde_mm_set1_epi32(1023));
+  simde__m128i result_exp =
+      simde_mm_srai_epi32(simde_mm_sub_epi32(simde_mm_set1_epi32(127), exp), 1);
+  simde__m128i entry = simde_mm_i32gather_epi32(table, index, 4);
+  simde__m128i slope = simde_mm_srli_epi32(entry, 16);
+  simde__m128i base =
+      simde_mm_and_si128(simde_mm_slli_epi32(entry, 10), simde_mm_set1_epi32(0x3FFFC00));
+  simde__m128i raw = simde_mm_sub_epi32(base, simde_mm_mullo_epi32(interp, slope));
+  // Normalise lanes with bit 25 clear. clz comes from the float exponent of the value with its lowest
+  // bit cleared (<= 24 significant bits, so the int->float conversion is exact).
+  simde__m128i need =
+      simde_mm_cmpeq_epi32(simde_mm_and_si128(raw, simde_mm_set1_epi32(1 << 25)), zero);
+  simde__m128i val = simde_mm_and_si128(raw, simde_mm_set1_epi32(0x1FFFFFE));
+  simde__m128i log2 = simde_mm_sub_epi32(
+      simde_mm_srli_epi32(simde_mm_castps_si128(simde_mm_cvtepi32_ps(val)), 23),
+      simde_mm_set1_epi32(127));
+  simde__m128i shift =
+      simde_mm_and_si128(need, simde_mm_sub_epi32(simde_mm_set1_epi32(25), log2));  // lz - 6
+  raw = simde_mm_sllv_epi32(raw, shift);
+  result_exp = simde_mm_sub_epi32(result_exp, shift);
+  // if ((raw & 5) && (raw & 2)) raw += 4
+  simde__m128i r5 = simde_mm_cmpeq_epi32(simde_mm_and_si128(raw, simde_mm_set1_epi32(5)), zero);
+  simde__m128i r2 = simde_mm_cmpeq_epi32(simde_mm_and_si128(raw, simde_mm_set1_epi32(2)), zero);
+  raw = simde_mm_add_epi32(raw,
+                           simde_mm_andnot_si128(simde_mm_or_si128(r5, r2), simde_mm_set1_epi32(4)));
+  simde__m128i result = simde_mm_or_si128(
+      simde_mm_add_epi32(simde_mm_slli_epi32(result_exp, 23), simde_mm_set1_epi32(0x3F800000)),
+      simde_mm_and_si128(simde_mm_srli_epi32(raw, 2), simde_mm_set1_epi32(0x7FFFFF)));
+  // Denormal result -> 0
+  simde__m128i rexp0 = simde_mm_cmpeq_epi32(
+      simde_mm_and_si128(result, simde_mm_set1_epi32(0x7F800000)), zero);
+  simde__m128i rman0 =
+      simde_mm_cmpeq_epi32(simde_mm_and_si128(result, simde_mm_set1_epi32(0x7FFFFF)), zero);
+  result = simde_mm_andnot_si128(simde_mm_andnot_si128(rman0, rexp0), result);
+  // Special inputs, lowest priority first (later blends win).
+  const simde__m128i qnan = simde_mm_set1_epi32(0x7FC00000);
+  result = simde_mm_blendv_epi8(result, qnan, simde_mm_srai_epi32(bits, 31));  // negative
+  simde__m128i ff_val = simde_mm_andnot_si128(
+      simde_mm_cmpeq_epi32(mant, zero), simde_mm_or_si128(bits, simde_mm_set1_epi32(0x00400000)));
+  result = simde_mm_blendv_epi8(result, ff_val,
+                                simde_mm_cmpeq_epi32(exp, simde_mm_set1_epi32(0xFF)));  // inf/nan
+  simde__m128i inf = simde_mm_or_si128(simde_mm_set1_epi32(0x7F800000),
+                                       simde_mm_slli_epi32(simde_mm_srli_epi32(bits, 31), 31));
+  result = simde_mm_blendv_epi8(result, inf, simde_mm_cmpeq_epi32(exp, zero));  // zero/denormal
+  result = simde_mm_blendv_epi8(
+      result, qnan, simde_mm_cmpeq_epi32(bits, simde_mm_set1_epi32(int32_t(0xFF800000u))));
+  return result;
+}
+
+inline simde__m128 simde_mm_vrsqrtefp_ps(simde__m128 value) {
+  return simde_mm_castsi128_ps(ppc_vrsqrtefp_bits_v(simde_mm_castps_si128(value)));
+}
+#else
 inline simde__m128 simde_mm_vrsqrtefp_ps(simde__m128 value) {
   alignas(16) float lanes[4];
   simde_mm_store_ps(lanes, value);
@@ -98,6 +170,7 @@ inline simde__m128 simde_mm_vrsqrtefp_ps(simde__m128 value) {
     lane = ppc_vrsqrtefp(lane);
   return simde_mm_load_ps(lanes);
 }
+#endif
 
 // Match Xenia's vmsum3fp128/vmsum4fp128 lowering: a single-precision SSE dot
 // product, followed by the emulator's overflow-to-QNaN behavior and guest FTZ.
