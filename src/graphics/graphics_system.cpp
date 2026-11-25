@@ -11,14 +11,21 @@
 
 #include <rex/graphics/graphics_system.h>
 
+#if REX_PLATFORM_WIN32
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
+#endif
+
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 #include <rex/cvar.h>
@@ -69,6 +76,20 @@ REXCVAR_DEFINE_INT32(vblank_precise_spin_us, 150, "GPU",
                      "Final vblank wait window that should busy-spin for tighter pacing")
     .range(0, 1000)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(vblank_from_display, false, "GPU",
+                    "Windows: keep the guest vblank in step with the desktop compositor's refresh "
+                    "(every Nth refresh, N = refresh / guest rate, phase steered just after it) "
+                    "so each frame stays on screen the same number of refreshes. Timer otherwise "
+                    "and under Wine / Proton");
+
+REXCVAR_DEFINE_INT32(vblank_from_display_offset_us, 500, "GPU",
+                     "vblank_from_display: where in the compositor's refresh the guest vblank goes, "
+                     "in microseconds after its vblank")
+    .range(0, 100000);
+
+REXCVAR_DEFINE_BOOL(vblank_from_display_log, false, "GPU",
+                    "Log the display lock's worst phase error every 120 frames");
 
 REXCVAR_DEFINE_BOOL(vblank_no_vsync_use_present_limiter, false, "GPU",
                     "Use the host present limiter FPS as the guest no-vsync vblank cadence")
@@ -158,6 +179,26 @@ __declspec(dllexport) uint32_t NvOptimusEnablement = 0x00000001;
 __declspec(dllexport) uint32_t AmdPowerXpressRequestHighPerformance = 1;
 }  // extern "C"
 #endif  // REX_PLATFORM_WIN32
+
+#if REX_PLATFORM_WIN32
+namespace {
+
+// The desktop compositor's refresh grid: the time of its last vblank and the refresh period, both
+// in QPC ticks (the host tick clock on Windows). A plain query - nothing waits on the display.
+bool GetCompositorVblank(uint64_t& last_vblank, double& period) {
+  DWM_TIMING_INFO info = {};
+  info.cbSize = sizeof(info);
+  if (FAILED(DwmGetCompositionTimingInfo(nullptr, &info)) || !info.qpcVBlank ||
+      !info.qpcRefreshPeriod) {
+    return false;
+  }
+  last_vblank = info.qpcVBlank;
+  period = double(info.qpcRefreshPeriod);
+  return true;
+}
+
+}  // namespace
+#endif
 
 GraphicsSystem::GraphicsSystem() : vsync_worker_running_(false) {}
 
@@ -268,7 +309,77 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
         uint64_t next_frame_host_tick =
             chrono::Clock::QueryHostTickCount() +
             (REXCVAR_GET(vsync) ? vsync_interval_host_ticks : no_vsync_interval_host_ticks);
+#if REX_PLATFORM_WIN32
+        // vblank_from_display: the guest vblank stays on the precise host-clock schedule, but its
+        // phase is steered (at most 0.25 ms a frame) to land just after a display vblank, and its
+        // period is a whole number of the display's refreshes. Every guest frame is then swapped
+        // early in a refresh and shown on the same refresh boundary, for exactly N refreshes.
+        const bool display_lock_allowed = !rex::thread::IsRunningUnderWine();
+        bool display_locked = false;
+        uint32_t logged_divider = ~0u;
+#endif
         while (vsync_worker_running_) {
+#if REX_PLATFORM_WIN32
+          uint64_t display_last = 0;
+          double display_period = 0.0;
+          uint32_t divider = 0;
+          if (display_lock_allowed && REXCVAR_GET(vblank_from_display) && REXCVAR_GET(vsync) &&
+              GetCompositorVblank(display_last, display_period)) {
+            const double n = std::round(double(vsync_interval_host_ticks) / display_period);
+            if (n >= 1.0 && n <= 8.0 &&
+                std::abs(n * display_period - double(vsync_interval_host_ticks)) <
+                    0.025 * double(vsync_interval_host_ticks)) {
+              divider = uint32_t(n);
+            }
+          }
+          if (divider != logged_divider) {
+            logged_divider = divider;
+            if (divider) {
+              REXGPU_INFO("Guest vblank locked to the display: {:.3f} Hz, every {} refresh(es)",
+                          double(host_tick_frequency) / display_period, divider);
+            } else if (REXCVAR_GET(vblank_from_display)) {
+              REXGPU_INFO("Guest vblank on the timer (display not usable as the reference)");
+            }
+          }
+          if (divider) {
+            const double interval = display_period * divider;
+            const uint64_t now = chrono::Clock::QueryHostTickCount();
+            if (!display_locked || next_frame_host_tick + uint64_t(interval) < now) {
+              next_frame_host_tick = now + uint64_t(interval);
+              display_locked = true;
+            }
+            // Phase error of the scheduled vblank against "0.5 ms after a display vblank".
+            const double target_offset =
+                double(host_tick_frequency) * 1e-6 * double(REXCVAR_GET(vblank_from_display_offset_us));
+            double rel = std::fmod(
+                double(int64_t(next_frame_host_tick - display_last)) - target_offset, display_period);
+            if (rel < 0.0) {
+              rel += display_period;
+            }
+            if (rel > display_period * 0.5) {
+              rel -= display_period;
+            }
+            if (REXCVAR_GET(vblank_from_display_log)) {
+              static double max_abs_rel = 0.0;
+              static uint32_t frames = 0;
+              max_abs_rel = std::max(max_abs_rel, std::abs(rel));
+              if (++frames >= 120) {
+                REXGPU_INFO("[display lock] worst phase error over 120 frames: {:.3f} ms",
+                            max_abs_rel * 1000.0 / double(host_tick_frequency));
+                max_abs_rel = 0.0;
+                frames = 0;
+              }
+            }
+            const double max_step = double(host_tick_frequency) * 0.00025;
+            next_frame_host_tick -= int64_t(std::clamp(rel, -max_step, max_step));
+            PreciseWaitUntilHostTick(next_frame_host_tick, host_tick_frequency);
+            MarkVblank();
+            next_frame_host_tick += uint64_t(interval);
+            next_frame_time = chrono::Clock::QueryGuestTickCount() + vsync_interval_ticks;
+            continue;
+          }
+          display_locked = false;
+#endif
           if (REXCVAR_GET(vblank_host_clock_pacing)) {
             bool vsync_enabled = REXCVAR_GET(vsync);
             no_vsync_interval_ticks = get_no_vsync_interval_ticks(guest_tick_frequency);
@@ -494,6 +605,10 @@ void GraphicsSystem::MarkVblank() {
   // TODO: Enable profiling once ported
   // SCOPE_profile_cpu_f("gpu");
 
+  last_vblank_steady_ns_.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count(),
+                               std::memory_order_relaxed);
   // Increment vblank counter (so the game sees us making progress).
   if (command_processor_) {
     command_processor_->increment_counter();

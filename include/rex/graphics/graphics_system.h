@@ -57,6 +57,10 @@ class GraphicsSystem : public system::IGraphicsSystem {
   system::KernelState* kernel_state() const { return kernel_state_; }
   ::rex::ui::GraphicsProvider* provider() const override { return provider_.get(); }
   ::rex::ui::Presenter* presenter() const override { return presenter_.get(); }
+  // steady_clock time of the last guest vblank, in nanoseconds since its epoch.
+  int64_t last_vblank_steady_ns() const {
+    return last_vblank_steady_ns_.load(std::memory_order_relaxed);
+  }
 
   X_STATUS SetupPresentation(::rex::ui::WindowedAppContext* app_context) override;
   X_STATUS SetupGuestGpu(runtime::FunctionDispatcher* function_dispatcher,
@@ -107,6 +111,7 @@ class GraphicsSystem : public system::IGraphicsSystem {
   void WriteRegister(uint32_t addr, uint32_t value);
 
   void MarkVblank();
+  std::atomic<int64_t> last_vblank_steady_ns_{0};
 
   memory::Memory* memory_ = nullptr;
   runtime::FunctionDispatcher* function_dispatcher_ = nullptr;

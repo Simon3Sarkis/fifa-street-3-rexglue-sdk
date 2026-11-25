@@ -2686,7 +2686,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
       REXGPU_INFO(
           "[frame cpu] {} interval_us={} wait_reg_mem_us={} no_commands_us={} gpu_fence_us={} "
           "swap_us={} submit_us={} thread_cpu_us={} draws={} copies={} texture_loads={} "
-          "upload_kb={} pipelines={}",
+          "upload_kb={} pipelines={} vblank_phase_us={}",
           frame_current_,
           std::chrono::duration_cast<std::chrono::microseconds>(now - last_swap).count(),
           delta[uint32_t(WaitStat::kWaitRegMem)], delta[uint32_t(WaitStat::kIdleNoCommands)],
@@ -2694,7 +2694,10 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
           delta[uint32_t(WaitStat::kSubmit)], thread_cpu_us - last_thread_cpu_us,
           frame_work_.draws.exchange(0), frame_work_.copies.exchange(0),
           frame_work_.texture_loads.exchange(0), frame_work_.upload_bytes.exchange(0) >> 10,
-          frame_work_.pipelines_created.exchange(0));
+          frame_work_.pipelines_created.exchange(0),
+          (std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count() -
+           graphics_system_->last_vblank_steady_ns()) /
+              1000);
     }
     last_thread_cpu_us = thread_cpu_us;
     last_swap = now;
