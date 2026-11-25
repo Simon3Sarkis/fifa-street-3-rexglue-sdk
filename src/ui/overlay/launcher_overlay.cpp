@@ -7,6 +7,7 @@
 #include <rex/ui/overlay/launcher_overlay.h>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <fstream>
 #include <mutex>
@@ -32,21 +33,25 @@ namespace rex::ui {
 
 namespace {
 
-// Game resolution: the video mode the game is told about (720p or 1080p, both modes of the console
-// game). Render scale: the GPU emulation draws every target that many times larger
-// (draw_resolution_scale), so the picture is rendered at the product.
+// Resolution the picture is drawn at. The game has two video modes of its own, 720p and 1080p (as on
+// the console; it falls back to 720p for anything else), so 1440p and 4K are those modes drawn
+// larger by the GPU emulation (draw_resolution_scale).
 struct ResolutionPreset {
   const char* label;
   const char* tooltip;
-  const char* resolution;  // the `resolution` cvar
-  int width;
-  int height;
+  const char* resolution;  // the `resolution` cvar: the game's video mode
+  int scale;               // draw_resolution_scale_x / _y
 };
 constexpr ResolutionPreset kResolutions[] = {
-    {"1280 x 720 (720p, original)", "The game's 720p mode, as on the console.", "720p", 1280, 720},
-    {"1920 x 1080 (1080p)", "The game's own 1080p mode.", "1080p", 1920, 1080},
+    {"1280 x 720 (original)", "The game's 720p mode, as on the console.", "720p", 1},
+    {"1920 x 1080", "The game's own 1080p mode.", "1080p", 1},
+    {"2560 x 1440", "The 720p mode drawn at twice the size.", "720p", 2},
+    {"3840 x 2160", "The 1080p mode drawn at twice the size.", "1080p", 2},
 };
-constexpr int kMaxRenderScale = 4;
+
+int ResolutionHeight(const ResolutionPreset& preset) {
+  return (std::string_view(preset.resolution) == "1080p" ? 1080 : 720) * preset.scale;
+}
 
 const char* const kScreenModes[] = {"Windowed", "Borderless fullscreen", "Exclusive fullscreen"};
 
@@ -144,15 +149,23 @@ void LauncherDialog::LoadFromSettings() {
 
   vsync_index_ = rex::cvar::Query<bool>("vulkan_allow_present_mode_immediate") ? 0 : 1;
 
+  // The preset with the same mode and scale, else the nearest drawn height (an older settings file
+  // may hold another scale, like 720p at 3x).
   const std::string resolution = rex::cvar::Query<std::string>("resolution");
+  const int scale = std::max(1, rex::cvar::Query<int32_t>("draw_resolution_scale_x"));
+  const int height = (resolution == "1080p" ? 1080 : 720) * scale;
   resolution_index_ = 0;
+  int best = INT_MAX;
   for (size_t i = 0; i < std::size(kResolutions); ++i) {
-    if (resolution == kResolutions[i].resolution) {
+    const auto& preset = kResolutions[i];
+    const int distance = (resolution == preset.resolution && scale == preset.scale)
+                             ? -1
+                             : std::abs(ResolutionHeight(preset) - height);
+    if (distance < best) {
+      best = distance;
       resolution_index_ = int(i);
     }
   }
-  scale_index_ =
-      std::clamp(rex::cvar::Query<int32_t>("draw_resolution_scale_x"), 1, kMaxRenderScale) - 1;
 }
 
 void LauncherDialog::SetGame(const std::filesystem::path& path) {
@@ -281,7 +294,7 @@ void LauncherDialog::SaveForNextStart() {
                 options_.settings_path.string(), e.description());
   }
   const bool vsync = vsync_index_ == 1;
-  const int scale = scale_index_ + 1;
+  const int scale = kResolutions[resolution_index_].scale;
   table.insert_or_assign("vulkan_allow_present_mode_immediate", !vsync);
   table.insert_or_assign("vulkan_allow_present_mode_mailbox", !vsync);
   table.insert_or_assign("resolution", std::string(kResolutions[resolution_index_].resolution));
@@ -314,8 +327,8 @@ void LauncherDialog::SaveAll() {
   rex::cvar::SetFlagByName("vulkan_allow_present_mode_mailbox", vsync ? "false" : "true");
   const auto& preset = kResolutions[resolution_index_];
   rex::cvar::SetFlagByName("resolution", preset.resolution);
-  rex::cvar::SetFlagByName("draw_resolution_scale_x", std::to_string(scale_index_ + 1));
-  rex::cvar::SetFlagByName("draw_resolution_scale_y", std::to_string(scale_index_ + 1));
+  rex::cvar::SetFlagByName("draw_resolution_scale_x", std::to_string(preset.scale));
+  rex::cvar::SetFlagByName("draw_resolution_scale_y", std::to_string(preset.scale));
   if (!game_path_.empty()) {
     rex::cvar::SetFlagByName("game_data_root", game_path_.string());
   }
@@ -631,21 +644,8 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
     for (const auto& r : kResolutions) {
       resolutions.push_back({r.label, r.tooltip});
     }
-    row_label("Game resolution");
+    row_label("Resolution");
     DrawCombo("##resolution", resolution_index_, resolutions, true, field_w);
-
-    const auto& base = kResolutions[resolution_index_];
-    std::vector<Choice> scales;
-    for (int scale = 1; scale <= kMaxRenderScale; ++scale) {
-      std::string label = fmt::format("{}x  ({} x {}{})", scale, base.width * scale,
-                                      base.height * scale, scale == 1 ? ", native" : "");
-      scales.push_back({std::move(label),
-                        scale == 1 ? "Draws at the game resolution."
-                                   : "Draws everything larger, then fits it to the screen: a "
-                                     "sharper picture for more GPU work."});
-    }
-    row_label("Render scale");
-    DrawCombo("##scale", scale_index_, scales, true, field_w);
 
     row_label("Frame rate");
     DrawCombo("##framerate", frame_rate_index_,
@@ -699,7 +699,7 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + content_w);
   if (options_.in_game) {
     ImGui::TextUnformatted(
-        "Display and screen mode change now. Game resolution, render scale and vsync take effect the "
+        "Display and screen mode change now. Resolution and vsync take effect the "
         "next time the game starts. The game keeps running while this menu is open. Close: B, Esc, "
         "F1 or Start + Back.");
   } else {
