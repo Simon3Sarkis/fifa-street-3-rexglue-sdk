@@ -30,20 +30,21 @@ namespace rex::ui {
 
 namespace {
 
-// Internal resolution: the game's own video mode (720p or 1080p, both modes of the console game)
-// times the GPU emulation's draw resolution scale.
+// Game resolution: the video mode the game is told about (720p or 1080p, both modes of the console
+// game). Render scale: the GPU emulation draws every target that many times larger
+// (draw_resolution_scale), so the picture is rendered at the product.
 struct ResolutionPreset {
   const char* label;
   const char* tooltip;
   const char* resolution;  // the `resolution` cvar
-  int scale;               // draw_resolution_scale_x / _y
+  int width;
+  int height;
 };
 constexpr ResolutionPreset kResolutions[] = {
-    {"1280 x 720 (original)", "The game's 720p mode, as on the console.", "720p", 1},
-    {"1920 x 1080", "The game's own 1080p mode.", "1080p", 1},
-    // No draw_resolution_scale 2x presets: the GPU emulation's resolution scaling is experimental
-    // and drops the players' shadows in FIFA Street 3 (1080p x1 vs x2, paused match, 2026-11-24).
+    {"1280 x 720 (720p, original)", "The game's 720p mode, as on the console.", "720p", 1280, 720},
+    {"1920 x 1080 (1080p)", "The game's own 1080p mode.", "1080p", 1920, 1080},
 };
+constexpr int kMaxRenderScale = 4;
 
 const char* const kScreenModes[] = {"Windowed", "Borderless fullscreen", "Exclusive fullscreen"};
 
@@ -144,10 +145,12 @@ void LauncherDialog::LoadFromSettings() {
   const std::string resolution = rex::cvar::Query<std::string>("resolution");
   resolution_index_ = 0;
   for (size_t i = 0; i < std::size(kResolutions); ++i) {
-    if (resolution == kResolutions[i].resolution) {  // a saved 2x scale goes back to 1x on Play
+    if (resolution == kResolutions[i].resolution) {
       resolution_index_ = int(i);
     }
   }
+  scale_index_ =
+      std::clamp(rex::cvar::Query<int32_t>("draw_resolution_scale_x"), 1, kMaxRenderScale) - 1;
 }
 
 void LauncherDialog::SetGame(const std::filesystem::path& path) {
@@ -265,8 +268,8 @@ void LauncherDialog::SaveAll() {
   rex::cvar::SetFlagByName("vulkan_allow_present_mode_mailbox", vsync ? "false" : "true");
   const auto& preset = kResolutions[resolution_index_];
   rex::cvar::SetFlagByName("resolution", preset.resolution);
-  rex::cvar::SetFlagByName("draw_resolution_scale_x", std::to_string(preset.scale));
-  rex::cvar::SetFlagByName("draw_resolution_scale_y", std::to_string(preset.scale));
+  rex::cvar::SetFlagByName("draw_resolution_scale_x", std::to_string(scale_index_ + 1));
+  rex::cvar::SetFlagByName("draw_resolution_scale_y", std::to_string(scale_index_ + 1));
   if (!game_path_.empty()) {
     rex::cvar::SetFlagByName("game_data_root", game_path_.string());
   }
@@ -571,8 +574,21 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
     for (const auto& r : kResolutions) {
       resolutions.push_back({r.label, r.tooltip});
     }
-    row_label("Internal resolution");
+    row_label("Game resolution");
     DrawCombo("##resolution", resolution_index_, resolutions, true, field_w);
+
+    const auto& base = kResolutions[resolution_index_];
+    std::vector<Choice> scales;
+    for (int scale = 1; scale <= kMaxRenderScale; ++scale) {
+      std::string label = fmt::format("{}x  ({} x {}{})", scale, base.width * scale,
+                                      base.height * scale, scale == 1 ? ", native" : "");
+      scales.push_back({std::move(label),
+                        scale == 1 ? "Draws at the game resolution."
+                                   : "Draws everything larger, then fits it to the screen: a "
+                                     "sharper picture for more GPU work."});
+    }
+    row_label("Render scale");
+    DrawCombo("##scale", scale_index_, scales, true, field_w);
 
     row_label("Frame rate");
     DrawCombo("##framerate", frame_rate_index_,

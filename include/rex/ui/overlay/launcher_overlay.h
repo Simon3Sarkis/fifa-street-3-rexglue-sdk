@@ -77,6 +77,7 @@ class LauncherDialog final : public ImGuiDialog {
   int refresh_index_ = 0;      // 0 = the display's current rate, then displays_[i].refresh_rates
   int vsync_index_ = 0;        // 0 off, 1 on
   int resolution_index_ = 0;   // see kResolutions in the .cpp
+  int scale_index_ = 0;        // render scale - 1 (1x..4x)
   int frame_rate_index_ = 0;   // 60 only
 
   bool pad_opened_ = false;
