@@ -1187,6 +1187,19 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
                   wait_stat_us_[3] / 1000.0 / frames, wait_stat_us_[4] / 1000.0 / frames,
                   double(wait_stat_n_[4]) / frames, wait_stat_us_[5] / 1000.0 / frames,
                   wait_stat_us_[6] / 1000.0 / frames, wait_stat_us_[7] / 1000.0 / frames);
+      // The host driver holding up submissions (seen on Windows with another program using the GPU:
+      // ~35 ms a frame) makes frames miss the vblank, and a game with double-buffered vsync then
+      // halves its frame rate. Say so in plain words, at most every 30 s.
+      static uint64_t last_blocked_warning = 0;
+      const double submit_ms = wait_stat_us_[4] / 1000.0 / frames;
+      if (submit_ms > 8.0 && (!last_blocked_warning || now - last_blocked_warning >= 30 * freq)) {
+        last_blocked_warning = now;
+        REXGPU_WARN(
+            "The graphics driver is holding up GPU work ({:.1f} ms a frame), so frames miss 60 FPS "
+            "and the game drops to 30. Usually another program using the GPU at the same time, or "
+            "an overlay / capture tool hooked into the game.",
+            submit_ms);
+      }
       for (uint32_t i = 0; i < uint32_t(WaitStat::kCount); ++i) {
         wait_stat_us_[i] = 0;
         wait_stat_n_[i] = 0;
