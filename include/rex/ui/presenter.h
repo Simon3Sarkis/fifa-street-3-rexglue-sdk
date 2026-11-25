@@ -335,6 +335,9 @@ class Presenter {
   void SetWindowSurfaceFromUIThread(Window* new_window, Surface* new_surface);
   void OnSurfaceMonitorUpdateFromUIThread(bool old_monitor_potentially_disconnected);
   void OnSurfaceResizeFromUIThread();
+  // Drops the surface connection (the swapchain) and connects again, so settings read only when
+  // connecting (such as the Vulkan present mode) take effect. UI thread, outside UI drawers.
+  void ReconnectSurfaceFromUIThread();
 
   // For calling from the platform paint event handler. Refreshes the surface
   // connection if needed, and also paints if possible and if needed (if there

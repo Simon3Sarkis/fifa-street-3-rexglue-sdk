@@ -1,0 +1,90 @@
+/**
+ * @file        rex/ui/overlay/launcher_overlay.h
+ *
+ * @brief       Pre-runtime launcher: pick the game's disc image, choose display settings from
+ *              dropdowns, then play. Mouse, keyboard and controller.
+ */
+
+#pragma once
+
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <rex/ui/imgui_dialog.h>
+#include <rex/ui/window.h>
+
+namespace rex::ui {
+
+class LauncherDialog final : public ImGuiDialog {
+ public:
+  struct GameCheck {
+    bool ok = false;
+    std::string message;  // "Ready: ..." or what is wrong with the file
+  };
+  struct Options {
+    std::string title;     // big heading
+    std::string subtitle;  // version line under it
+    std::filesystem::path game_path;      // current game location (disc image or folder), may be empty
+    std::filesystem::path settings_path;  // the user's settings file; choices are saved there
+    std::string picker_hint;              // shown when no game is set up yet
+  };
+  using CheckGameCallback = std::function<GameCheck(const std::filesystem::path&)>;
+  using PlayCallback = std::function<void(const std::filesystem::path& game_path)>;
+  using QuitCallback = std::function<void()>;
+
+  LauncherDialog(ImGuiDrawer* drawer, Window* window, Options options, CheckGameCallback check_game,
+                 PlayCallback play, QuitCallback quit);
+  ~LauncherDialog() override;
+
+ protected:
+  void OnDraw(ImGuiIO& io) override;
+  void OnClose() override;
+
+ private:
+  struct PickerState;
+  struct Choice {
+    std::string label;
+    std::string tooltip;
+  };
+
+  void LoadFromSettings();
+  void SetGame(const std::filesystem::path& path);
+  void OpenPicker();
+  void PollPicker();
+  void ApplyDisplay();
+  void SaveAll();
+  void PollGamepad(ImGuiIO& io);
+  bool DrawCombo(const char* id, int& index, const std::vector<Choice>& choices, bool enabled,
+                 float width);
+  std::vector<Choice> RefreshChoices() const;
+
+  Window* window_;
+  Options options_;
+  CheckGameCallback check_game_;
+  PlayCallback play_;
+  QuitCallback quit_;
+
+  std::filesystem::path game_path_;
+  GameCheck game_check_;
+  std::shared_ptr<PickerState> picker_;
+
+  std::vector<DisplayInfo> displays_;
+  int display_index_ = 0;      // into displays_
+  int screen_mode_index_ = 1;  // 0 windowed, 1 borderless, 2 exclusive
+  int refresh_index_ = 0;      // 0 = the display's current rate, then displays_[i].refresh_rates
+  int vsync_index_ = 0;        // 0 off, 1 on
+  int resolution_index_ = 0;   // see kResolutions in the .cpp
+  int frame_rate_index_ = 0;   // 60 only
+
+  bool pad_opened_ = false;
+  bool first_frame_ = true;
+  int saved_config_flags_ = 0;
+  int saved_backend_flags_ = 0;
+  bool played_ = false;
+  double shown_time_ = 0.0;
+};
+
+}  // namespace rex::ui

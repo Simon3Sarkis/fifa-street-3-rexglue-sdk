@@ -153,25 +153,11 @@ bool WindowSDL::OpenImpl() {
   sdl_app_context().RegisterWindow(sdl_window_id_, this);
 
   // Center on the requested display before fullscreen so SDL resolves
-  // fullscreen against it. 1-based enumeration order; 0 = system default.
-  if (int32_t monitor_index = REXCVAR_GET(monitor); monitor_index > 0) {
-    int display_count = 0;
-    SDL_DisplayID* displays = SDL_GetDisplays(&display_count);
-    if (displays) {
-      if (monitor_index <= display_count) {
-        SDL_DisplayID display = displays[monitor_index - 1];
-        SDL_SetWindowPosition(sdl_window_, SDL_WINDOWPOS_CENTERED_DISPLAY(display),
-                              SDL_WINDOWPOS_CENTERED_DISPLAY(display));
-      } else {
-        REXLOG_WARN("monitor cvar is {} but only {} display(s) present; using default",
-                    monitor_index, display_count);
-      }
-      SDL_free(displays);
-    }
-  }
+  // fullscreen against it.
+  MoveToConfiguredDisplay();
 
   if (IsFullscreen()) {
-    // Borderless desktop fullscreen (a NULL display mode is SDL3's default).
+    ApplyFullscreenDisplayMode();
     SDL_SetWindowFullscreen(sdl_window_, true);
   }
 #if REX_PLATFORM_MAC
@@ -307,7 +293,118 @@ void WindowSDL::ApplyNewFullscreen() {
   if (!sdl_window_) {
     return;
   }
+  if (IsFullscreen()) {
+    ApplyFullscreenDisplayMode();
+  }
   SDL_SetWindowFullscreen(sdl_window_, IsFullscreen());
+}
+
+// The monitor cvar: 1-based SDL display enumeration order; 0 = system default.
+void WindowSDL::MoveToConfiguredDisplay() {
+  const int32_t monitor_index = REXCVAR_GET(monitor);
+  if (!sdl_window_ || monitor_index <= 0) {
+    return;
+  }
+  int display_count = 0;
+  SDL_DisplayID* displays = SDL_GetDisplays(&display_count);
+  if (!displays) {
+    return;
+  }
+  if (monitor_index <= display_count) {
+    SDL_DisplayID display = displays[monitor_index - 1];
+    SDL_SetWindowPosition(sdl_window_, SDL_WINDOWPOS_CENTERED_DISPLAY(display),
+                          SDL_WINDOWPOS_CENTERED_DISPLAY(display));
+  } else {
+    REXLOG_WARN("monitor cvar is {} but only {} display(s) present; using default", monitor_index,
+                display_count);
+  }
+  SDL_free(displays);
+}
+
+// Borderless: a NULL fullscreen mode (a desktop-sized window, SDL3's default). Exclusive: the
+// display's desktop size at fullscreen_refresh_rate (0 = the current rate), so the display switches
+// modes only when another refresh rate is asked for.
+void WindowSDL::ApplyFullscreenDisplayMode() {
+  if (!sdl_window_) {
+    return;
+  }
+  const SDL_DisplayMode* mode = nullptr;
+  SDL_DisplayMode closest = {};
+  if (REXCVAR_GET(fullscreen_mode) == "exclusive") {
+    SDL_DisplayID display = SDL_GetDisplayForWindow(sdl_window_);
+    if (const SDL_DisplayMode* desktop = display ? SDL_GetDesktopDisplayMode(display) : nullptr) {
+      const double wanted = REXCVAR_GET(fullscreen_refresh_rate);
+      const float refresh = wanted > 0.0 ? float(wanted) : desktop->refresh_rate;
+      if (SDL_GetClosestFullscreenDisplayMode(display, desktop->w, desktop->h, refresh, false,
+                                              &closest)) {
+        mode = &closest;
+        REXLOG_INFO("Exclusive fullscreen: {}x{} @ {:.2f} Hz", closest.w, closest.h,
+                    closest.refresh_rate);
+      } else {
+        REXLOG_WARN("Exclusive fullscreen: no {}x{} @ {:.2f} Hz mode ({}); using borderless",
+                    desktop->w, desktop->h, refresh, SDL_GetError());
+      }
+    }
+  }
+  SDL_SetWindowFullscreenMode(sdl_window_, mode);
+}
+
+void WindowSDL::ApplyDisplaySettings() {
+  if (!sdl_window_) {
+    return;
+  }
+  const bool fullscreen = REXCVAR_GET(fullscreen);
+  // Leave fullscreen first: a fullscreen window doesn't move between displays.
+  if (IsFullscreen()) {
+    SDL_SetWindowFullscreen(sdl_window_, false);
+  }
+  MoveToConfiguredDisplay();
+  SetFullscreen(fullscreen);
+  if (fullscreen) {
+    ApplyFullscreenDisplayMode();
+    SDL_SetWindowFullscreen(sdl_window_, true);
+  }
+}
+
+std::vector<DisplayInfo> EnumerateDisplays() {
+  std::vector<DisplayInfo> result;
+  int display_count = 0;
+  SDL_DisplayID* displays = SDL_GetDisplays(&display_count);
+  if (!displays) {
+    return result;
+  }
+  for (int i = 0; i < display_count; ++i) {
+    DisplayInfo info;
+    const char* name = SDL_GetDisplayName(displays[i]);
+    info.name = name && *name ? name : fmt::format("Display {}", i + 1);
+    if (const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(displays[i])) {
+      info.width = desktop->w;
+      info.height = desktop->h;
+      info.refresh_hz = desktop->refresh_rate;
+    }
+    int mode_count = 0;
+    if (SDL_DisplayMode** modes = SDL_GetFullscreenDisplayModes(displays[i], &mode_count)) {
+      for (int m = 0; m < mode_count; ++m) {
+        if (modes[m]->w != info.width || modes[m]->h != info.height) {
+          continue;
+        }
+        // Rates within 0.5 Hz are one choice (59.94 / 60).
+        const float hz = modes[m]->refresh_rate;
+        if (std::none_of(info.refresh_rates.begin(), info.refresh_rates.end(),
+                         [hz](float r) { return std::abs(r - hz) < 0.5f; })) {
+          info.refresh_rates.push_back(hz);
+        }
+      }
+      SDL_free(modes);
+    }
+    std::sort(info.refresh_rates.begin(), info.refresh_rates.end(), std::greater<float>());
+    if (info.refresh_rates.empty() && info.refresh_hz > 0.0f) {
+      info.refresh_rates.push_back(info.refresh_hz);
+    }
+    result.push_back(std::move(info));
+  }
+  SDL_free(displays);
+  return result;
 }
 
 void WindowSDL::ApplyNewTitle() {

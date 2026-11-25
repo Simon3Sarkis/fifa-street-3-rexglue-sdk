@@ -34,6 +34,8 @@ class WindowSDL final : public Window {
   void* GetNativeWindowHandle() const override;
   bool SetRelativeMouseMode(bool enable) override;
   bool WarpMouseToCenter(int32_t& x_out, int32_t& y_out) override;
+  void ApplyDisplaySettings() override;
+  SDL_Window* sdl_window() const { return sdl_window_; }
 
   // Called by SDLWindowedAppContext on the UI thread.
   void HandleWindowEvent(SDL_Event& event);
@@ -72,6 +74,8 @@ class WindowSDL final : public Window {
   void PerformClose();
   void DestroySDLWindow();
 
+  void MoveToConfiguredDisplay();
+  void ApplyFullscreenDisplayMode();
   void ApplyCursorVisibilityNow();
   void ApplyTextInputActiveNow();
   void RearmCursorAutoHideTimer();

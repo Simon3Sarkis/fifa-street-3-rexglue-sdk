@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 #include <utility>
 
 #include <rex/platform.h>
@@ -28,6 +29,17 @@
 
 namespace rex {
 namespace ui {
+
+// A connected display, for settings menus. Index i + 1 is its value for the monitor cvar.
+struct DisplayInfo {
+  std::string name;
+  int width = 0;   // current desktop mode
+  int height = 0;
+  float refresh_hz = 0.0f;
+  std::vector<float> refresh_rates;  // fullscreen modes at the desktop size, highest first
+};
+// Implemented by the platform window backend; empty before the video subsystem is up.
+std::vector<DisplayInfo> EnumerateDisplays();
 
 class Window {
  public:
@@ -151,6 +163,13 @@ class Window {
     kAutoHidden,
     kHidden,
   };
+
+  // Moves the window to the display chosen by the monitor cvar and re-applies fullscreen,
+  // fullscreen_mode and fullscreen_refresh_rate. Call on the UI thread.
+  virtual void ApplyDisplaySettings() {}
+  // Rebuilds the presenter's connection to the window (its swapchain), so settings read only when
+  // connecting take effect. UI thread, outside UI drawers.
+  void ReconnectPresenter();
 
   static std::unique_ptr<Window> Create(WindowedAppContext& app_context,
                                         const std::string_view title,

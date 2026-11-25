@@ -448,6 +448,21 @@ void Presenter::OnSurfaceResizeFromUIThread() {
   }
 }
 
+void Presenter::ReconnectSurfaceFromUIThread() {
+  assert_false(is_executing_ui_drawers_);
+  if (!surface_) {
+    return;
+  }
+  if (paint_mode_ == PaintMode::kGuestOutputThreadImmediately) {
+    SetPaintModeFromUIThread(PaintMode::kUIThreadOnRequest);
+  }
+  DisconnectPaintingFromSurfaceFromUIThread(
+      SurfacePaintConnectionState::kUnconnectedRetryAtStateChange);
+  bool request_repaint;
+  UpdateSurfacePaintConnectionFromUIThread(&request_repaint, true);
+  RequestPaintOrConnectionRecoveryViaWindow(true);
+}
+
 void Presenter::PaintFromUIThread(bool force_paint) {
   // If there is no surface, this will be a no-op, nothing outdated, nothing to
   // paint. However, an explicit monitor check is needed because UI framerate

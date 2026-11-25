@@ -44,6 +44,15 @@ REXCVAR_DEFINE_INT32(monitor, 0, "UI/Window",
     .range(0, 16)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+// How "fullscreen" takes the screen: "borderless" (a desktop-sized window, the desktop's display
+// mode stays) or "exclusive" (the display switches to the display mode below).
+REXCVAR_DEFINE_STRING(fullscreen_mode, "borderless", "UI/Window",
+                      "Fullscreen kind: \"borderless\" or \"exclusive\"");
+
+REXCVAR_DEFINE_DOUBLE(fullscreen_refresh_rate, 0.0, "UI/Window",
+                      "Exclusive fullscreen refresh rate in Hz (0 = the display's current rate)")
+    .range(0.0, 1000.0);
+
 REXCVAR_DEFINE_STRING(video_driver, "", "UI/Window",
                       "SDL video driver to use, such as \"wayland\" or \"x11\". Empty picks "
                       "SDL's default for the session")
@@ -302,6 +311,12 @@ bool Window::Open() {
   OnSurfaceChanged(true);
 
   return true;
+}
+
+void Window::ReconnectPresenter() {
+  if (presenter_) {
+    presenter_->ReconnectSurfaceFromUIThread();
+  }
 }
 
 void Window::SetFullscreen(bool new_fullscreen) {

@@ -33,6 +33,7 @@ set(REXUI_OVERLAY_SOURCES
     overlay/quit_overlay.cpp
     overlay/acquire_wizard_overlay.cpp
     overlay/install_wizard_overlay.cpp
+    overlay/launcher_overlay.cpp
     overlay/wizard_screen.cpp
     overlay/simple_settings_overlay.cpp
     overlay/console_commands.cpp
