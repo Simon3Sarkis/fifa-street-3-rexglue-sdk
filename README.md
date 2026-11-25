@@ -1,3 +1,9 @@
+> [!NOTE]
+> **This is a fork** (branch `fifastreet3`) with the changes from a FIFA Street 3 recomp: native Linux
+> and Steam Deck fixes (59.9 FPS native vs 52.2 under Proton on the Deck, clean audio, 60 at 10 W),
+> playing from an ISO, a launcher. What changed and the measurements: [docs/STEAM_DECK.md](docs/STEAM_DECK.md).
+> The original SDK is [rexglue/rexglue-sdk](https://github.com/rexglue/rexglue-sdk).
+
 > [!CAUTION]
 > This project is in early development. Expect things to not work quite right and there to be significant changes and breaking public API updates as development progresses. Contributions and feedback are welcome, but please be aware that the codebase is still evolving rapidly.
 
