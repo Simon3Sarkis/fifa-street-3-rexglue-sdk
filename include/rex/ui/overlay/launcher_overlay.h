@@ -32,7 +32,7 @@ class LauncherDialog final : public ImGuiDialog {
     std::string picker_hint;              // shown when no game is set up yet
     // In-game options menu instead of the pre-runtime launcher: no disc image section, "Back to
     // game" instead of Play (PlayCallback), "Quit game" (QuitCallback), B / Esc closes. Settings
-    // the running game can't change (resolution, vsync) only go to the
+    // the running game can't change (game resolution, render scale, vsync) only go to the
     // settings file, for the next start.
     bool in_game = false;
   };
@@ -83,6 +83,7 @@ class LauncherDialog final : public ImGuiDialog {
   int refresh_index_ = 0;      // 0 = the display's current rate, then displays_[i].refresh_rates
   int vsync_index_ = 0;        // 0 off, 1 on
   int resolution_index_ = 0;   // see kResolutions in the .cpp
+  int scale_index_ = 0;        // render scale - 1 (1x..4x)
   int frame_rate_index_ = 0;   // 60 only
 
   bool pad_opened_ = false;
