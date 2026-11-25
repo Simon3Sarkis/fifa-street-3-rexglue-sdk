@@ -265,6 +265,10 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   Runtime* runtime() const { return runtime_.get(); }
   ui::Window* window() const { return window_.get(); }
   ui::ImGuiDrawer* imgui_drawer() const { return imgui_drawer_.get(); }
+  // While set, the guest gets no controller / keyboard input (an app's own modal menu is open).
+  void SetGuestInputBlocked(bool blocked) {
+    guest_input_blocked_.store(blocked, std::memory_order_release);
+  }
   ui::ImmediateDrawer* immediate_drawer() const { return immediate_drawer_.get(); }
   system::AchievementManager& achievements() const;
 
@@ -331,6 +335,7 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   std::unique_ptr<ui::QuitDialog> quit_dialog_;
   // Mirrors quit_dialog_ for the input gate, which runs on guest threads.
   std::atomic<bool> quit_dialog_open_{false};
+  std::atomic<bool> guest_input_blocked_{false};
   std::unique_ptr<ui::ImGuiDialog> achievements_overlay_;
   std::shared_ptr<ui::AchievementNotificationDialog> achievement_notification_;
   uint64_t achievement_notification_listener_ = 0;

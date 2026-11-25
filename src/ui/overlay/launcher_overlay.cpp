@@ -8,9 +8,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <mutex>
 
 #include <SDL3/SDL.h>
+#include <toml++/toml.hpp>
 #include <fmt/format.h>
 #include <imgui.h>
 
@@ -261,7 +263,51 @@ void LauncherDialog::ApplyDisplay() {
   }
 }
 
+// In-game: what the running game reads only at start goes straight to the settings file; the
+// display settings (applied live already) are saved from their current values.
+void LauncherDialog::SaveForNextStart() {
+  if (options_.settings_path.empty()) {
+    return;
+  }
+  rex::cvar::SaveConfigValues(options_.settings_path,
+                              {"monitor", "fullscreen", "fullscreen_mode", "fullscreen_refresh_rate"});
+  toml::table table;
+  try {
+    if (std::filesystem::exists(options_.settings_path)) {
+      table = toml::parse_file(options_.settings_path.string());
+    }
+  } catch (const toml::parse_error& e) {
+    REXLOG_WARN("Options: {} unreadable ({}), rewriting the settings it holds",
+                options_.settings_path.string(), e.description());
+  }
+  const bool vsync = vsync_index_ == 1;
+  const int scale = scale_index_ + 1;
+  table.insert_or_assign("vulkan_allow_present_mode_immediate", !vsync);
+  table.insert_or_assign("vulkan_allow_present_mode_mailbox", !vsync);
+  table.insert_or_assign("resolution", std::string(kResolutions[resolution_index_].resolution));
+  table.insert_or_assign("draw_resolution_scale_x", int64_t(scale));
+  table.insert_or_assign("draw_resolution_scale_y", int64_t(scale));
+  std::error_code ec;
+  const auto temp = options_.settings_path.string() + ".tmp";
+  {
+    std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+    out << "# Auto-generated cvar configuration\n" << table << "\n";
+    if (!out) {
+      REXLOG_ERROR("Options: cannot write {}", temp);
+      return;
+    }
+  }
+  std::filesystem::rename(temp, options_.settings_path, ec);
+  if (ec) {
+    REXLOG_ERROR("Options: cannot replace {}: {}", options_.settings_path.string(), ec.message());
+  }
+}
+
 void LauncherDialog::SaveAll() {
+  if (options_.in_game) {
+    SaveForNextStart();
+    return;
+  }
   const bool vsync = vsync_index_ == 1;
   const bool vsync_changed = rex::cvar::Query<bool>("vulkan_allow_present_mode_immediate") == vsync;
   rex::cvar::SetFlagByName("vulkan_allow_present_mode_immediate", vsync ? "false" : "true");
@@ -326,6 +372,12 @@ void LauncherDialog::PollGamepad(ImGuiIO& io) {
   button(ImGuiKey_GamepadDpadLeft, SDL_GAMEPAD_BUTTON_DPAD_LEFT);
   button(ImGuiKey_GamepadDpadRight, SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
   button(ImGuiKey_GamepadStart, SDL_GAMEPAD_BUTTON_START);
+  const bool b_down = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST);
+  if (options_.in_game && b_down && !pad_b_was_down_ &&
+      !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
+    close_requested_ = true;
+  }
+  pad_b_was_down_ = b_down;
   auto axis = [&](ImGuiKey negative, ImGuiKey positive, SDL_GamepadAxis a) {
     const float v = SDL_GetGamepadAxis(pad, a) / 32767.0f;
     constexpr float kDead = 0.35f;
@@ -406,10 +458,13 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
 
   // Backdrop.
   ImDrawList* bg = ImGui::GetBackgroundDrawList();
-  bg->AddRectFilledMultiColor(ImVec2(0, 0), display, ImGui::GetColorU32(kBackdropTop),
-                              ImGui::GetColorU32(kBackdropTop),
-                              ImGui::GetColorU32(kBackdropBottom),
-                              ImGui::GetColorU32(kBackdropBottom));
+  // The launcher covers the screen; in the game, the game stays visible behind a dim scrim.
+  const float backdrop_alpha = options_.in_game ? 0.62f : 1.0f;
+  ImVec4 top = kBackdropTop, bottom = kBackdropBottom;
+  top.w = bottom.w = backdrop_alpha;
+  bg->AddRectFilledMultiColor(ImVec2(0, 0), display, ImGui::GetColorU32(top),
+                              ImGui::GetColorU32(top), ImGui::GetColorU32(bottom),
+                              ImGui::GetColorU32(bottom));
   bg->AddRectFilled(ImVec2(0, 0), ImVec2(display.x, 4.0f * s), ImGui::GetColorU32(kAccent));
 
   const float panel_w = std::min(display.x - 32.0f * s, 860.0f * s);
@@ -481,7 +536,8 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
     ImGui::SameLine(field_x);
   };
 
-  // Game.
+  // Game (the launcher only: the running game keeps its disc).
+  if (!options_.in_game) {
   section("GAME");
   row_label("Disc image");
   {
@@ -520,6 +576,7 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   ImGui::PopFont();
   ImGui::PopTextWrapPos();
   ImGui::PopStyleColor();
+  }
 
   // Display.
   section("DISPLAY");
@@ -599,24 +656,27 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   // Buttons.
   ImGui::Dummy(ImVec2(0, 16.0f * s));
   const float play_w = 220.0f * s;
-  const float quit_w = 140.0f * s;
+  const float quit_w = (options_.in_game ? 170.0f : 140.0f) * s;
   const float button_h = 54.0f * s;
   ImGui::SetCursorPosX(ImGui::GetCursorPosX() + content_w - play_w - quit_w -
                        ImGui::GetStyle().ItemSpacing.x);
-  if (ImGui::Button("Quit", ImVec2(quit_w, button_h)) && !played_) {
+  if (ImGui::Button(options_.in_game ? "Quit game" : "Quit", ImVec2(quit_w, button_h)) &&
+      !played_) {
     played_ = true;
     if (quit_) {
       quit_();
     }
   }
   ImGui::SameLine();
-  ImGui::BeginDisabled(!game_check_.ok);
+  const bool play_enabled = options_.in_game || game_check_.ok;
+  ImGui::BeginDisabled(!play_enabled);
   ImGui::PushStyleColor(ImGuiCol_Button, kAccent);
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAccentHover);
   ImGui::PushStyleColor(ImGuiCol_ButtonActive, kAccentHover);
   ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.06f, 0.04f, 0.02f, 1.0f));
   ImGui::PushFont(font_bold, 22.0f * s);
-  bool play = ImGui::Button("PLAY", ImVec2(play_w, button_h));
+  bool play =
+      ImGui::Button(options_.in_game ? "BACK TO GAME" : "PLAY", ImVec2(play_w, button_h));
   if (const int autoplay_ms = REXCVAR_GET(launcher_autoplay_ms); autoplay_ms > 0) {
     if (first_frame_) {
       shown_time_ = ImGui::GetTime();
@@ -624,7 +684,7 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
       play = true;
     }
   }
-  if (first_frame_ && game_check_.ok) {
+  if (first_frame_ && play_enabled) {
     ImGui::SetItemDefaultFocus();
     ImGui::SetKeyboardFocusHere(-1);
   }
@@ -636,9 +696,18 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   ImGui::Dummy(ImVec2(0, 4.0f * s));
   ImGui::PushFont(nullptr, 15.0f * s);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
-  ImGui::TextUnformatted(
-      "Mouse, keyboard (arrows, Enter, Esc) or controller (D-pad, A, B). Settings are saved for "
-      "next time.");
+  ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + content_w);
+  if (options_.in_game) {
+    ImGui::TextUnformatted(
+        "Display and screen mode change now. Game resolution, render scale and vsync take effect the "
+        "next time the game starts. The game keeps running while this menu is open. Close: B, Esc, "
+        "F1 or Start + Back.");
+  } else {
+    ImGui::TextUnformatted(
+        "Mouse, keyboard (arrows, Enter, Esc) or controller (D-pad, A, B). Settings are saved for "
+        "next time. In the game: F1, Esc or Start + Back for these options.");
+  }
+  ImGui::PopTextWrapPos();
   ImGui::PopStyleColor();
   ImGui::PopFont();
 
@@ -649,7 +718,11 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
 
   first_frame_ = false;
 
-  if (play && game_check_.ok && !played_) {
+  if (close_requested_) {
+    close_requested_ = false;
+    play = true;
+  }
+  if (play && play_enabled && !played_) {
     played_ = true;
     SaveAll();
     PlayCallback play_callback = play_;

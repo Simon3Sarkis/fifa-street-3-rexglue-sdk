@@ -366,13 +366,9 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   }
 
   const uint16_t menu_chord_buttons = ChordMaskFromSpec(REXCVAR_GET(menu_chord));
-  const bool menu_chord_down =
+  bool menu_chord_down =
       menu_chord_buttons != 0 &&
       (static_cast<uint16_t>(merged.gamepad.buttons) & menu_chord_buttons) == menu_chord_buttons;
-  if (menu_chord_down && !menu_chord_down_ && menu_chord_callback_) {
-    menu_chord_callback_();
-  }
-  menu_chord_down_ = menu_chord_down;
 
   if (active_callback_ && !active_callback_()) {
     std::memset(&merged.gamepad, 0, sizeof(merged.gamepad));
@@ -382,7 +378,16 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   if (script_) {
     const uint32_t changes = script_->Apply(user_index, merged.gamepad);
     merged.packet_number = static_cast<uint32_t>(merged.packet_number) + changes;
+    // A scripted chord counts too, so test scripts can open the menu.
+    menu_chord_down = menu_chord_down ||
+                      (menu_chord_buttons != 0 &&
+                       (static_cast<uint16_t>(merged.gamepad.buttons) & menu_chord_buttons) ==
+                           menu_chord_buttons);
   }
+  if (menu_chord_down && !menu_chord_down_ && menu_chord_callback_) {
+    menu_chord_callback_();
+  }
+  menu_chord_down_ = menu_chord_down;
 
   if (out_state) {
     *out_state = merged;

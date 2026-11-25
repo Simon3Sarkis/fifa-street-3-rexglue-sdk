@@ -603,7 +603,8 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
         // Only interactive overlays take input from the guest. Passive dialogs
         // (FPS counter, achievement toast) stay registered for the whole
         // session, so HasDialogs() alone would gate the game permanently.
-        if (quit_dialog_open_.load(std::memory_order_acquire)) {
+        if (quit_dialog_open_.load(std::memory_order_acquire) ||
+            guest_input_blocked_.load(std::memory_order_acquire)) {
           return false;
         }
         if (!debug_overlay_ && !console_overlay_ && !settings_overlay_ && !achievements_overlay_) {

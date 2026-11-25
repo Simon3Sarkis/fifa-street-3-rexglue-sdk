@@ -30,6 +30,11 @@ class LauncherDialog final : public ImGuiDialog {
     std::filesystem::path game_path;      // current game location (disc image or folder), may be empty
     std::filesystem::path settings_path;  // the user's settings file; choices are saved there
     std::string picker_hint;              // shown when no game is set up yet
+    // In-game options menu instead of the pre-runtime launcher: no disc image section, "Back to
+    // game" instead of Play (PlayCallback), "Quit game" (QuitCallback), B / Esc closes. Settings
+    // the running game can't change (game resolution, render scale, vsync) only go to the
+    // settings file, for the next start.
+    bool in_game = false;
   };
   using CheckGameCallback = std::function<GameCheck(const std::filesystem::path&)>;
   using PlayCallback = std::function<void(const std::filesystem::path& game_path)>;
@@ -56,6 +61,7 @@ class LauncherDialog final : public ImGuiDialog {
   void PollPicker();
   void ApplyDisplay();
   void SaveAll();
+  void SaveForNextStart();
   void PollGamepad(ImGuiIO& io);
   bool DrawCombo(const char* id, int& index, const std::vector<Choice>& choices, bool enabled,
                  float width);
@@ -86,6 +92,8 @@ class LauncherDialog final : public ImGuiDialog {
   int saved_backend_flags_ = 0;
   bool played_ = false;
   double shown_time_ = 0.0;
+  bool pad_b_was_down_ = true;  // a B already held when the menu opens doesn't close it
+  bool close_requested_ = false;
 };
 
 }  // namespace rex::ui
