@@ -29,6 +29,7 @@
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/platform.h>
+#include <rex/thread.h>
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/util.h>
 
@@ -75,6 +76,16 @@ REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_mailbox, true, "UI/Vulkan",
 
 REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_fifo_relaxed, true, "UI/Vulkan",
                     "Allow FIFO relaxed present mode");
+
+// Measured 2026-11-27 (FIFA Street 3, RTX 4090, 2560x1440 120 Hz, the same match each run):
+// borderless with immediate 38.5 FPS and mailbox 39.2 FPS, vkQueueSubmit blocked 15-16 ms a frame;
+// borderless with FIFO and exclusive fullscreen with immediate a locked 60, 0.03-0.06 ms.
+REXCVAR_DEFINE_BOOL(vulkan_composited_present_fifo, true, "UI/Vulkan",
+                    "Windows: when the window goes through the desktop compositor (borderless or "
+                    "windowed, not exclusive fullscreen), present with FIFO instead of immediate or "
+                    "mailbox. With those, the NVIDIA driver blocks GPU submissions ~16 ms a frame "
+                    "there and a 60 FPS game drops to 30-40. Not applied under Wine / Proton")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_BOOL(vulkan_present_timing_log, false, "UI/Vulkan",
                     "Log averaged Vulkan host presentation timing")
@@ -1530,14 +1541,29 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
   // variable refresh rate may be used where it's available.
   // Note: If the priorities here are changes, update the cvar descriptions.
   constexpr bool allow_immediate_present_mode = true;
-  if (allow_immediate_present_mode && REXCVAR_GET(vulkan_allow_present_mode_immediate) &&
+  // Through the desktop compositor (Windows borderless / windowed), only FIFO keeps GPU submissions
+  // from blocking; see vulkan_composited_present_fifo. The swapchain is recreated when the screen
+  // mode changes, so this follows it.
+  bool composited_fifo = false;
+#if REX_PLATFORM_WIN32
+  composited_fifo = REXCVAR_GET(vulkan_composited_present_fifo) &&
+                    !rex::thread::IsRunningUnderWine() &&
+                    !(rex::cvar::Query<bool>("fullscreen") &&
+                      rex::cvar::Query<std::string>("fullscreen_mode") == "exclusive");
+#endif
+  if (composited_fifo) {
+    REXLOG_INFO("VulkanPresenter: borderless / windowed on Windows: FIFO presentation "
+                "(vulkan_composited_present_fifo)");
+  }
+  if (!composited_fifo && allow_immediate_present_mode &&
+      REXCVAR_GET(vulkan_allow_present_mode_immediate) &&
       std::find(present_modes.cbegin(), present_modes.cend(), VK_PRESENT_MODE_IMMEDIATE_KHR) !=
           present_modes.cend()) {
     // Allowing tearing to reduce latency, and possibly variable refresh rate
     // (though on Windows with borderless fullscreen, GDI copying is used
     // instead of independent flip, so it's not supported there).
     swapchain_create_info.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
-  } else if (REXCVAR_GET(vulkan_allow_present_mode_mailbox) &&
+  } else if (!composited_fifo && REXCVAR_GET(vulkan_allow_present_mode_mailbox) &&
              std::find(present_modes.cbegin(), present_modes.cend(), VK_PRESENT_MODE_MAILBOX_KHR) !=
                  present_modes.cend()) {
     // Allowing dropping frames to reduce latency, but no tearing.
