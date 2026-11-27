@@ -129,6 +129,7 @@ constexpr ImVec4 kAccent{0.79f, 0.11f, 0.11f, 1.0f};
 constexpr ImVec4 kAccentHover{0.90f, 0.20f, 0.17f, 1.0f};
 constexpr ImVec4 kGood{0.12f, 0.43f, 0.17f, 1.0f};
 constexpr ImVec4 kBad{0.72f, 0.10f, 0.08f, 1.0f};
+constexpr ImVec4 kWarn{0.66f, 0.38f, 0.02f, 1.0f};
 constexpr ImVec4 kField{0.36f, 0.26f, 0.16f, 0.14f};
 constexpr ImVec4 kFieldHover{0.36f, 0.26f, 0.16f, 0.26f};
 constexpr ImVec4 kInk{0.24f, 0.18f, 0.13f, 0.92f};  // dark tabs and the title outline
@@ -396,7 +397,7 @@ void LauncherDialog::SetGame(const std::filesystem::path& path) {
   }
 }
 
-void LauncherDialog::OpenPicker() {
+void LauncherDialog::OpenPicker(bool folder) {
   {
     std::lock_guard lock(picker_->mutex);
     if (picker_->open) {
@@ -418,7 +419,8 @@ void LauncherDialog::OpenPicker() {
     start = (std::filesystem::is_directory(game_path_) ? game_path_ : game_path_.parent_path())
                 .string();
   }
-  SDL_ShowOpenFileDialog(
+  // Called once with the choice (or none, or an error), on whichever thread SDL uses.
+  const SDL_DialogFileCallback done =
       [](void* userdata, const char* const* files, int) {
         auto* state_holder = static_cast<std::shared_ptr<PickerState>*>(userdata);
         auto& state = **state_holder;
@@ -433,9 +435,15 @@ void LauncherDialog::OpenPicker() {
           state.done = true;
         }
         delete state_holder;
-      },
-      holder, sdl_window ? sdl_window->sdl_window() : nullptr, kFilters, int(std::size(kFilters)),
-      start.empty() ? nullptr : start.c_str(), false);
+      };
+  SDL_Window* parent = sdl_window ? sdl_window->sdl_window() : nullptr;
+  const char* start_at = start.empty() ? nullptr : start.c_str();
+  if (folder) {
+    SDL_ShowOpenFolderDialog(done, holder, parent, start_at, false);
+  } else {
+    SDL_ShowOpenFileDialog(done, holder, parent, kFilters, int(std::size(kFilters)), start_at,
+                           false);
+  }
 }
 
 void LauncherDialog::PollPicker() {
@@ -940,16 +948,17 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   // Game (the launcher only: the running game keeps its disc).
   if (!options_.in_game) {
   section("GAME");
-  row_label("Disc image");
+  row_label("Game");
   {
     const float button_w = 170.0f * s;
+    const float folder_w = 120.0f * s;
     std::string shown = game_path_.empty() ? std::string("Not selected")
                                            : game_path_.filename().string();
     if (shown.empty()) {
       shown = game_path_.string();
     }
     ImGui::PushStyleColor(ImGuiCol_Text, game_path_.empty() ? kTextDim : kText);
-    ImGui::SetNextItemWidth(field_w - button_w - ImGui::GetStyle().ItemSpacing.x);
+    ImGui::SetNextItemWidth(field_w - button_w - folder_w - 2 * ImGui::GetStyle().ItemSpacing.x);
     ImGui::BeginDisabled();
     ImGui::InputText("##game", shown.data(), shown.size() + 1, ImGuiInputTextFlags_ReadOnly);
     ImGui::EndDisabled();
@@ -965,12 +974,21 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
     }
     ImGui::BeginDisabled(picker_open);
     if (ImGui::Button(picker_open ? "Selecting..." : "Select ISO...", ImVec2(button_w, 0))) {
-      OpenPicker();
+      OpenPicker(false);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Folder...", ImVec2(folder_w, 0))) {
+      OpenPicker(true);
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+      ImGui::SetTooltip("A folder the game was extracted to (the one with default.xex)");
     }
     ImGui::EndDisabled();
   }
   ImGui::SetCursorPosX(field_x);
-  ImGui::PushStyleColor(ImGuiCol_Text, game_check_.ok ? kGood : (game_path_.empty() ? kTextDim : kBad));
+  ImGui::PushStyleColor(ImGuiCol_Text, game_check_.ok   ? (game_check_.warning ? kWarn : kGood)
+                                       : game_path_.empty() ? kTextDim
+                                                            : kBad);
   ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + field_w);
   ImGui::PushFont(nullptr, 16.0f * s);
   ImGui::TextUnformatted(game_check_.message.c_str());

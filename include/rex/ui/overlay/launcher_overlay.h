@@ -34,6 +34,7 @@ class LauncherDialog final : public ImGuiDialog {
   struct GameCheck {
     bool ok = false;
     std::string message;  // "Ready: ..." or what is wrong with the file
+    bool warning = false;  // playable, but the message is a caution (e.g. an untested version)
   };
   struct Options {
     std::string title;     // big heading
@@ -79,7 +80,7 @@ class LauncherDialog final : public ImGuiDialog {
 
   void LoadFromSettings();
   void SetGame(const std::filesystem::path& path);
-  void OpenPicker();
+  void OpenPicker(bool folder);  // a disc image file, or an extracted game folder
   void PollPicker();
   void ApplyDisplay();
   // The options that change while the game runs (upscaling filter, sharpening, texture
