@@ -125,6 +125,17 @@ class LauncherDialog final : public ImGuiDialog {
   bool pad_lb_was_down_ = true;
   bool pad_rb_was_down_ = true;
   bool close_requested_ = false;
+
+  // Look: open / close animation and the highlighted row (the game's red pill).
+  double open_time_ = -1.0;
+  double closing_since_ = -1.0;
+  int pending_action_ = 0;  // 1 play / back to game, 2 quit: run once the close animation ends
+  int hot_row_ = -1;        // row hovered or focused last frame
+  int hot_row_next_ = -1;
+  int row_counter_ = 0;
+  int current_row_ = -1;
+  int first_tab_row_ = 0;
+  int focus_frames_ = 3;  // options_menu_focus_row (testing) is applied over the first frames
 };
 
 }  // namespace rex::ui

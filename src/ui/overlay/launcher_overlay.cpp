@@ -7,6 +7,8 @@
 #include <rex/ui/overlay/launcher_overlay.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cfloat>
 #include <cmath>
 #include <fstream>
 #include <mutex>
@@ -27,6 +29,12 @@ REXCVAR_DEFINE_INT32(launcher_autoplay_ms, 0, "UI",
                      "Testing: press the launcher's Play by itself this many ms after it first "
                      "shows (0 = off)")
     .range(0, 600000);
+
+REXCVAR_DEFINE_INT32(options_menu_focus_row, -1, "UI",
+                     "Testing: the row of the open tab that has the focus when the menu opens "
+                     "(-1 = the Play / Back to game button)")
+    .range(-1, 16)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_INT32(options_menu_tab, 0, "UI",
                      "Options menu tab shown when it opens: 0 Display, 1 Graphics, 2 Audio, "
@@ -108,18 +116,110 @@ const std::vector<std::string_view> kLiveCvars = {
     "anisotropic_override", "swap_post_effect",                "show_fps_counter",
     "show_fps_counter_detail"};
 
-// Colours (linear 0-1 RGBA).
-constexpr ImVec4 kBackdropTop{0.035f, 0.045f, 0.075f, 1.0f};
-constexpr ImVec4 kBackdropBottom{0.012f, 0.014f, 0.024f, 1.0f};
-constexpr ImVec4 kPanel{0.075f, 0.085f, 0.120f, 0.96f};
-constexpr ImVec4 kText{0.93f, 0.94f, 0.96f, 1.0f};
-constexpr ImVec4 kTextDim{0.58f, 0.61f, 0.68f, 1.0f};
-constexpr ImVec4 kAccent{1.00f, 0.47f, 0.10f, 1.0f};
-constexpr ImVec4 kAccentHover{1.00f, 0.56f, 0.24f, 1.0f};
-constexpr ImVec4 kGood{0.36f, 0.85f, 0.50f, 1.0f};
-constexpr ImVec4 kBad{1.00f, 0.42f, 0.40f, 1.0f};
-constexpr ImVec4 kField{0.11f, 0.125f, 0.17f, 1.0f};
-constexpr ImVec4 kFieldHover{0.15f, 0.17f, 0.23f, 1.0f};
+// Colours (0-1 RGBA), after FIFA Street 3's own menus: a parchment panel with ragged paint edges,
+// dark ink, the selected row in a red pill. Drawn with shapes only (no game art).
+constexpr ImVec4 kBackdropTop{0.17f, 0.12f, 0.08f, 1.0f};
+constexpr ImVec4 kBackdropBottom{0.06f, 0.045f, 0.035f, 1.0f};
+constexpr ImVec4 kPanelTop{0.91f, 0.86f, 0.73f, 1.0f};
+constexpr ImVec4 kPanelBottom{0.83f, 0.76f, 0.61f, 1.0f};
+constexpr ImVec4 kText{0.17f, 0.13f, 0.10f, 1.0f};
+constexpr ImVec4 kTextDim{0.40f, 0.33f, 0.26f, 1.0f};
+constexpr ImVec4 kTextLight{0.99f, 0.97f, 0.93f, 1.0f};
+constexpr ImVec4 kAccent{0.79f, 0.11f, 0.11f, 1.0f};
+constexpr ImVec4 kAccentHover{0.90f, 0.20f, 0.17f, 1.0f};
+constexpr ImVec4 kGood{0.12f, 0.43f, 0.17f, 1.0f};
+constexpr ImVec4 kBad{0.72f, 0.10f, 0.08f, 1.0f};
+constexpr ImVec4 kField{0.36f, 0.26f, 0.16f, 0.14f};
+constexpr ImVec4 kFieldHover{0.36f, 0.26f, 0.16f, 0.26f};
+constexpr ImVec4 kInk{0.24f, 0.18f, 0.13f, 0.92f};  // dark tabs and the title outline
+
+constexpr double kOpenSeconds = 0.20;
+constexpr double kCloseSeconds = 0.14;
+
+ImVec4 Lerp(const ImVec4& a, const ImVec4& b, float t) {
+  return ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t,
+                a.w + (b.w - a.w) * t);
+}
+
+// A parchment panel with ragged paint edges, a few stains and splatter around it. Deterministic,
+// so it doesn't flicker. Colours go through GetColorU32, so the open / close fade applies.
+void DrawParchment(ImDrawList* dl, ImVec2 a, ImVec2 b, float s) {
+  uint32_t seed = 0x2F6E2B1u;
+  auto rnd = [&seed](float lo, float hi) {
+    seed = seed * 1664525u + 1013904223u;
+    return lo + (hi - lo) * float(seed >> 8) / float(1u << 24);
+  };
+  const float h = std::max(1.0f, b.y - a.y);
+  auto col_at = [&](float y, float alpha = 1.0f) {
+    ImVec4 c = Lerp(kPanelTop, kPanelBottom, std::clamp((y - a.y) / h, 0.0f, 1.0f));
+    c.w *= alpha;
+    return ImGui::GetColorU32(c);
+  };
+  dl->PushClipRectFullScreen();
+  // Soft shadow.
+  for (int i = 0; i < 3; ++i) {
+    const float g = (6.0f + 7.0f * i) * s;
+    dl->AddRectFilled(ImVec2(a.x - g * 0.4f, a.y + g * 0.6f), ImVec2(b.x + g * 0.4f, b.y + g),
+                      ImGui::GetColorU32(ImVec4(0, 0, 0, 0.10f)), 18.0f * s);
+  }
+  dl->AddRectFilledMultiColor(a, b, col_at(a.y), col_at(a.y), col_at(b.y), col_at(b.y));
+  // Ragged edges: small, uneven dabs of paint along each side, now and then a bigger one.
+  auto dab = [&]() { return (rnd(0.0f, 1.0f) < 0.15f ? rnd(7.0f, 11.0f) : rnd(2.0f, 6.0f)) * s; };
+  const float step = 7.0f * s;
+  for (float x = a.x; x <= b.x; x += step * rnd(0.5f, 1.4f)) {
+    dl->AddCircleFilled(ImVec2(x, a.y + rnd(-1.0f, 2.0f) * s), dab(), col_at(a.y), 10);
+    dl->AddCircleFilled(ImVec2(x, b.y + rnd(-2.0f, 1.0f) * s), dab(), col_at(b.y), 10);
+  }
+  for (float y = a.y; y <= b.y; y += step * rnd(0.5f, 1.4f)) {
+    dl->AddCircleFilled(ImVec2(a.x + rnd(-1.0f, 2.0f) * s, y), dab(), col_at(y), 10);
+    dl->AddCircleFilled(ImVec2(b.x + rnd(-2.0f, 1.0f) * s, y), dab(), col_at(y), 10);
+  }
+  // Splatter off the top-left and bottom-right corners, and a few drips.
+  for (int i = 0; i < 14; ++i) {
+    const bool tl = i < 8;
+    const ImVec2 c = tl ? a : b;
+    const float dx = rnd(10.0f, 70.0f) * s * (tl ? -1.0f : 1.0f);
+    const float dy = rnd(-50.0f, 60.0f) * s * (tl ? -0.6f : 0.6f);
+    const float y = c.y + dy;
+    dl->AddCircleFilled(ImVec2(c.x + dx * 0.6f, y), rnd(2.5f, 11.0f) * s, col_at(y));
+  }
+  for (int i = 0; i < 5; ++i) {
+    const float x = rnd(a.x + 40.0f * s, b.x - 40.0f * s);
+    const float len = rnd(8.0f, 26.0f) * s;
+    const float w = rnd(3.0f, 6.0f) * s;
+    dl->AddRectFilled(ImVec2(x - w * 0.5f, b.y), ImVec2(x + w * 0.5f, b.y + len), col_at(b.y),
+                      w * 0.5f);
+    dl->AddCircleFilled(ImVec2(x, b.y + len), w * 0.8f, col_at(b.y));
+  }
+  // Aged paper: the edges a little darker than the middle.
+  const float band = 34.0f * s;
+  const ImU32 shade = ImGui::GetColorU32(ImVec4(0.50f, 0.37f, 0.22f, 0.16f));
+  const ImU32 clear = ImGui::GetColorU32(ImVec4(0.50f, 0.37f, 0.22f, 0.0f));
+  dl->AddRectFilledMultiColor(a, ImVec2(b.x, a.y + band), shade, shade, clear, clear);
+  dl->AddRectFilledMultiColor(ImVec2(a.x, b.y - band), b, clear, clear, shade, shade);
+  dl->AddRectFilledMultiColor(a, ImVec2(a.x + band, b.y), shade, clear, clear, shade);
+  dl->AddRectFilledMultiColor(ImVec2(b.x - band, a.y), b, clear, shade, shade, clear);
+  dl->PopClipRect();
+}
+
+// Text with a dark outline, like the game's menu titles.
+void OutlinedText(ImDrawList* dl, ImFont* font, float size, ImVec2 pos, const char* text,
+                  float thickness) {
+  const ImU32 outline = ImGui::GetColorU32(kInk);
+  for (int i = 0; i < 12; ++i) {
+    const float a = float(i) * 6.2831853f / 12.0f;
+    dl->AddText(font, size, ImVec2(pos.x + std::cos(a) * thickness, pos.y + std::sin(a) * thickness),
+                outline, text);
+  }
+  dl->AddText(font, size, pos, ImGui::GetColorU32(kTextLight), text);
+}
+
+std::string Upper(std::string text) {
+  for (char& c : text) {
+    c = char(std::toupper(static_cast<unsigned char>(c)));
+  }
+  return text;
+}
 
 std::string FormatHz(float hz) {
   // 59.94 stays 59.94; 60.00 prints as 60.
@@ -556,8 +656,17 @@ bool LauncherDialog::DrawCombo(const char* id, int& index, const std::vector<Cho
   // The list gets its own, tighter padding (the panel's would leave a gap and a scrollbar).
   const float s = ImGui::GetStyle().FramePadding.y / 9.0f;
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f * s, 6.0f * s));
+  if (focus_frames_ > 0 && current_row_ >= 0 &&
+      current_row_ - first_tab_row_ == REXCVAR_GET(options_menu_focus_row)) {
+    ImGui::SetKeyboardFocusHere();
+  }
   const bool open = ImGui::BeginCombo(id, preview, ImGuiComboFlags_HeightLarge);
   ImGui::PopStyleVar();
+  // The row's label shows the game's red pill while its field is hovered or focused.
+  if (current_row_ >= 0 &&
+      (ImGui::IsItemFocused() || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))) {
+    hot_row_next_ = current_row_;
+  }
   if (open) {
     for (int i = 0; i < int(choices.size()); ++i) {
       const bool selected = i == index;
@@ -604,6 +713,37 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   PollGamepad(io);
   PollPicker();
 
+  // Slide and fade in; on Play / Back / Quit, slide out first, then act.
+  const double now = ImGui::GetTime();
+  if (open_time_ < 0.0) {
+    open_time_ = now;
+  }
+  if (pending_action_ && now - closing_since_ >= kCloseSeconds) {
+    const int action = pending_action_;
+    pending_action_ = 0;
+    if (action == 1) {
+      SaveAll();
+      PlayCallback play_callback = play_;
+      std::filesystem::path game = game_path_;
+      if (play_callback) {
+        play_callback(game);
+      }
+    } else if (action == 2 && quit_) {
+      quit_();
+    }
+  }
+  float anim = float(std::clamp((now - open_time_) / kOpenSeconds, 0.0, 1.0));
+  anim = 1.0f - (1.0f - anim) * (1.0f - anim) * (1.0f - anim);  // ease out
+  float slide = 1.0f - anim;
+  if (closing_since_ >= 0.0) {
+    const float c = float(std::clamp((now - closing_since_) / kCloseSeconds, 0.0, 1.0));
+    anim = std::min(anim, 1.0f - c * c);
+    slide = -c;
+  }
+  ImGui::PushStyleVar(ImGuiStyleVar_Alpha, std::max(anim, 0.0f));
+  row_counter_ = 0;
+  current_row_ = -1;
+
   const ImVec2 display = io.DisplaySize;
   // Laid out for 1080p; scaled with the window, kept readable on the Deck's 800p panel.
   const float s = std::clamp(display.y / 1080.0f, 0.75f, 3.0f);
@@ -615,7 +755,7 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   // Backdrop.
   ImDrawList* bg = ImGui::GetBackgroundDrawList();
   // The launcher covers the screen; in the game, the game stays visible behind a dim scrim.
-  const float backdrop_alpha = options_.in_game ? 0.62f : 1.0f;
+  const float backdrop_alpha = options_.in_game ? 0.55f : 1.0f;
   ImVec4 top = kBackdropTop, bottom = kBackdropBottom;
   top.w = bottom.w = backdrop_alpha;
   bg->AddRectFilledMultiColor(ImVec2(0, 0), display, ImGui::GetColorU32(top),
@@ -624,8 +764,8 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   bg->AddRectFilled(ImVec2(0, 0), ImVec2(display.x, 4.0f * s), ImGui::GetColorU32(kAccent));
 
   const float panel_w = std::min(display.x - 32.0f * s, 860.0f * s);
-  ImGui::SetNextWindowPos(ImVec2(display.x * 0.5f, display.y * 0.5f), ImGuiCond_Always,
-                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowPos(ImVec2(display.x * 0.5f - slide * 70.0f * s, display.y * 0.5f),
+                          ImGuiCond_Always, ImVec2(0.5f, 0.5f));
   ImGui::SetNextWindowSize(ImVec2(panel_w, 0.0f), ImGuiCond_Always);
 
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(40.0f * s, 34.0f * s));
@@ -636,9 +776,9 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12.0f * s, 12.0f * s));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
   ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
-  ImGui::PushStyleColor(ImGuiCol_WindowBg, kPanel);
-  ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.10f, 0.115f, 0.16f, 0.99f));
-  ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1, 1, 1, 0.08f));
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+  ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.93f, 0.89f, 0.78f, 0.99f));
+  ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.36f, 0.26f, 0.16f, 0.35f));
   ImGui::PushStyleColor(ImGuiCol_Text, kText);
   ImGui::PushStyleColor(ImGuiCol_TextDisabled, kTextDim);
   ImGui::PushStyleColor(ImGuiCol_FrameBg, kField);
@@ -648,13 +788,13 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kFieldHover);
   ImGui::PushStyleColor(ImGuiCol_ButtonActive, kFieldHover);
   ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.30f));
-  ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.45f));
+  ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.40f));
   ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.55f));
   ImGui::PushStyleColor(ImGuiCol_NavCursor, kAccent);
-  ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(1, 1, 1, 0.07f));
+  ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(0.36f, 0.26f, 0.16f, 0.30f));
   ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, ImVec4(0, 0, 0, 0));
-  ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, ImVec4(1, 1, 1, 0.18f));
-  ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(1, 1, 1, 0.28f));
+  ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, ImVec4(0.36f, 0.26f, 0.16f, 0.30f));
+  ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(0.36f, 0.26f, 0.16f, 0.45f));
   ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, kAccent);
   ImGui::PushFont(font, 19.0f * s);
 
@@ -662,10 +802,29 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize);
 
-  // Heading.
-  ImGui::PushFont(font_bold, 40.0f * s);
-  ImGui::TextUnformatted(options_.title.c_str());
-  ImGui::PopFont();
+  // The parchment, behind everything in the window (its size is last frame's).
+  {
+    const ImVec2 pos = ImGui::GetWindowPos();
+    const ImVec2 size = ImGui::GetWindowSize();
+    if (size.y > 1.0f) {
+      DrawParchment(ImGui::GetWindowDrawList(), pos, ImVec2(pos.x + size.x, pos.y + size.y), s);
+    }
+  }
+
+  // Heading: big, outlined, upper case, like the game's "GAME PAUSED".
+  {
+    const std::string title = Upper(options_.title);
+    const float size = 62.0f * s;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const ImVec2 extent = font_bold->CalcTextSizeA(size, FLT_MAX, 0.0f, title.c_str());
+    // Over the panel's top-left edge, as the game sets its menu titles.
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->PushClipRectFullScreen();
+    OutlinedText(dl, font_bold, size, ImVec2(at.x - 18.0f * s, at.y - 52.0f * s), title.c_str(),
+                 3.2f * s);
+    dl->PopClipRect();
+    ImGui::Dummy(ImVec2(extent.x, std::max(1.0f, extent.y - 54.0f * s)));
+  }
   ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
   ImGui::TextUnformatted(options_.subtitle.c_str());
   ImGui::PopStyleColor();
@@ -713,21 +872,48 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   enum class Applies { kNow, kRestart, kNone };
   auto row_label = [&](const char* label, Applies applies = Applies::kNone) {
     const float row_y = ImGui::GetCursorPosY();
+    current_row_ = row_counter_++;
+    const bool hot = current_row_ == hot_row_;
+    if (hot) {
+      // The game's selection: a red pill with the (A) button glyph.
+      ImDrawList* dl = ImGui::GetWindowDrawList();
+      const ImVec2 p0 = ImGui::GetCursorScreenPos();
+      const float hgt = ImGui::GetFrameHeight();
+      const float pill_w = (options_.in_game ? 184.0f : 270.0f) * s;
+      dl->AddRectFilled(p0, ImVec2(p0.x + pill_w, p0.y + hgt), ImGui::GetColorU32(kAccent),
+                        hgt * 0.5f);
+      const ImVec2 c(p0.x + hgt * 0.5f, p0.y + hgt * 0.5f);
+      dl->AddCircleFilled(c, 9.0f * s, ImGui::GetColorU32(kTextLight));
+      const float gs = 13.0f * s;
+      const ImVec2 gsz = font_bold->CalcTextSizeA(gs, FLT_MAX, 0.0f, "A");
+      dl->AddText(font_bold, gs, ImVec2(c.x - gsz.x * 0.5f, c.y - gsz.y * 0.5f),
+                  ImGui::GetColorU32(kAccent), "A");
+      ImGui::SetCursorPosX(ImGui::GetCursorPosX() + hgt * 0.5f + 16.0f * s);
+      ImGui::PushStyleColor(ImGuiCol_Text, kTextLight);
+    }
     ImGui::AlignTextToFramePadding();
+    ImGui::PushFont(font_semibold, 0.0f);
     ImGui::TextUnformatted(label);
+    ImGui::PopFont();
+    if (hot) {
+      ImGui::PopStyleColor();
+    }
     if (options_.in_game && applies != Applies::kNone) {
       ImGui::SameLine(ImGui::GetCursorStartPos().x + 192.0f * s);
       ImGui::PushFont(font_semibold, 12.0f * s);
       const bool now = applies == Applies::kNow;
-      ImGui::PushStyleColor(ImGuiCol_Text, now ? ImVec4(kGood.x, kGood.y, kGood.z, 0.85f)
-                                               : ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.85f));
+      ImGui::PushStyleColor(ImGuiCol_Text, hot ? kTextLight
+                                           : now ? ImVec4(kGood.x, kGood.y, kGood.z, 0.9f)
+                                                 : ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.9f));
       // Centred on the row's text (the tag font is smaller).
       ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ImGui::GetStyle().FramePadding.y + 1.0f * s);
       ImGui::TextUnformatted(now ? "NOW" : "RESTART");
       ImGui::PopStyleColor();
       ImGui::PopFont();
     }
-    ImGui::SameLine(field_x);
+    // From this window's own start: inside the tab body (a child with no padding) field_x, which
+    // counts the panel's padding, would push the field past the edge and scroll the child.
+    ImGui::SameLine(ImGui::GetCursorStartPos().x + label_w);
     ImGui::SetCursorPosY(row_y);  // the field lines up with the label, not the tag
   };
   auto note = [&](const char* text) {
@@ -789,14 +975,17 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
     tab_request_ = (tab_ + 1) % kTabCount;
   }
   ImGui::Dummy(ImVec2(0, 4.0f * s));
-  ImGui::PushStyleColor(ImGuiCol_Tab, kField);
-  ImGui::PushStyleColor(ImGuiCol_TabHovered, kFieldHover);
-  ImGui::PushStyleColor(ImGuiCol_TabSelected, ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.85f));
+  ImGui::PushStyleColor(ImGuiCol_Tab, kInk);
+  ImGui::PushStyleColor(ImGuiCol_TabHovered, kAccentHover);
+  ImGui::PushStyleColor(ImGuiCol_TabSelected, kAccent);
   ImGui::PushStyleColor(ImGuiCol_TabSelectedOverline, kAccent);
-  ImGui::PushStyleColor(ImGuiCol_TabDimmed, kField);
-  ImGui::PushStyleColor(ImGuiCol_TabDimmedSelected, ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.85f));
+  ImGui::PushStyleColor(ImGuiCol_TabDimmed, kInk);
+  ImGui::PushStyleColor(ImGuiCol_TabDimmedSelected, kAccent);
+  ImGui::PushStyleColor(ImGuiCol_Text, kTextLight);
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(22.0f * s, 9.0f * s));
-  ImGui::PushFont(font_semibold, 18.0f * s);
+  ImGui::PushStyleVar(ImGuiStyleVar_TabRounding, 16.0f * s);
+  ImGui::PushStyleVar(ImGuiStyleVar_TabBarBorderSize, 0.0f);
+  ImGui::PushFont(font_bold, 18.0f * s);
   // The first frame opens on the remembered tab. A requested tab (first frame, LB / RB, PgUp /
   // PgDn) is shown at once and kept requested until ImGui reports it selected (it shows the first
   // tab on its first frame); otherwise tab_ follows ImGui (mouse clicks).
@@ -805,7 +994,8 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_FittingPolicyShrink)) {
     for (int t = 0; t < kTabCount; ++t) {
       const ImGuiTabItemFlags flags = request == t ? ImGuiTabItemFlags_SetSelected : 0;
-      if (ImGui::BeginTabItem(kTabs[t], nullptr, flags)) {
+      const std::string tab_label = Upper(kTabs[t]) + "###tab" + std::to_string(t);
+      if (ImGui::BeginTabItem(tab_label.c_str(), nullptr, flags)) {
         imgui_selected = t;
         ImGui::EndTabItem();
       }
@@ -819,14 +1009,15 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
     REXCVAR_SET(options_menu_tab, shown);
   }
   ImGui::PopFont();
-  ImGui::PopStyleVar();
-  ImGui::PopStyleColor(6);
+  ImGui::PopStyleVar(3);
+  ImGui::PopStyleColor(7);
 
   const float row_h = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y;
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
   ImGui::BeginChild("##tabbody", ImVec2(content_w, row_h * 7.0f + 8.0f * s),
                     ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoScrollbar);
   ImGui::Dummy(ImVec2(0, 4.0f * s));
+  first_tab_row_ = row_counter_;
   if (tab_ == 0) {
     // Display.
     std::vector<Choice> displays;
@@ -991,20 +1182,29 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   const float button_h = 54.0f * s;
   ImGui::SetCursorPosX(ImGui::GetCursorPosX() + content_w - play_w - quit_w -
                        ImGui::GetStyle().ItemSpacing.x);
-  if (ImGui::Button(options_.in_game ? "Quit game" : "Quit", ImVec2(quit_w, button_h)) &&
+  ImGui::PushStyleColor(ImGuiCol_Button, kInk);
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.34f, 0.26f, 0.19f, 0.95f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.34f, 0.26f, 0.19f, 0.95f));
+  ImGui::PushStyleColor(ImGuiCol_Text, kTextLight);
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, button_h * 0.5f);
+  ImGui::PushFont(font_bold, 19.0f * s);
+  if (ImGui::Button(options_.in_game ? "QUIT GAME" : "QUIT", ImVec2(quit_w, button_h)) &&
       !played_) {
     played_ = true;
-    if (quit_) {
-      quit_();
-    }
+    pending_action_ = 2;
+    closing_since_ = ImGui::GetTime();
   }
+  ImGui::PopFont();
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor(4);
   ImGui::SameLine();
   const bool play_enabled = options_.in_game || game_check_.ok;
   ImGui::BeginDisabled(!play_enabled);
   ImGui::PushStyleColor(ImGuiCol_Button, kAccent);
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAccentHover);
   ImGui::PushStyleColor(ImGuiCol_ButtonActive, kAccentHover);
-  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.06f, 0.04f, 0.02f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_Text, kTextLight);
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, button_h * 0.5f);
   ImGui::PushFont(font_bold, 22.0f * s);
   bool play =
       ImGui::Button(options_.in_game ? "BACK TO GAME" : "PLAY", ImVec2(play_w, button_h));
@@ -1015,11 +1215,15 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
       play = true;
     }
   }
-  if (first_frame_ && play_enabled) {
+  if (first_frame_ && play_enabled && REXCVAR_GET(options_menu_focus_row) < 0) {
     ImGui::SetItemDefaultFocus();
     ImGui::SetKeyboardFocusHere(-1);
   }
+  if (focus_frames_ > 0) {
+    --focus_frames_;
+  }
   ImGui::PopFont();
+  ImGui::PopStyleVar();
   ImGui::PopStyleColor(4);
   ImGui::EndDisabled();
 
@@ -1048,21 +1252,22 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   ImGui::PopFont();
   ImGui::PopStyleColor(20);
   ImGui::PopStyleVar(8);
+  ImGui::PopStyleVar();  // alpha (open / close animation)
 
   first_frame_ = false;
+  hot_row_ = hot_row_next_;
+  hot_row_next_ = -1;
+  current_row_ = -1;
 
   if (close_requested_) {
     close_requested_ = false;
     play = true;
   }
   if (play && play_enabled && !played_) {
+    // Slide out first; the next frames run Play / Back to game (see the top of OnDraw).
     played_ = true;
-    SaveAll();
-    PlayCallback play_callback = play_;
-    std::filesystem::path game = game_path_;
-    if (play_callback) {
-      play_callback(game);
-    }
+    pending_action_ = 1;
+    closing_since_ = ImGui::GetTime();
   }
 }
 
