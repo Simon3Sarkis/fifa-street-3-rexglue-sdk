@@ -41,6 +41,12 @@ REXCVAR_DEFINE_INT32(filesystem_debug_log_team_profile_background_remaining, 0, 
     .lifecycle(rex::cvar::Lifecycle::kHotReload)
     .debug_only();
 
+REXCVAR_DEFINE_BOOL(filesystem_log_opens, false, "Filesystem",
+                    "Log every file the game opens (path and whether it exists): which movies, "
+                    "venues and sound banks a run used")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload)
+    .debug_only();
+
 REXCVAR_DEFINE_BOOL(filesystem_debug_log_chan_center_stream_files, false, "Filesystem",
                     "Log focused Chan Center world chunk file opens to disk")
     .lifecycle(rex::cvar::Lifecycle::kHotReload)
@@ -354,6 +360,10 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry, const std::string_view p
                                      FileAction* out_action) {
   // TODO(gibbed): should 'is_directory' remain as a bool or should it be
   // flipped to a generic FileAttributeFlags?
+
+  if (REXCVAR_GET(filesystem_log_opens) && !is_directory) {
+    REXLOG_INFO("File open: {}", path);
+  }
 
   // Cleanup access.
   if (desired_access & FileAccess::kGenericRead) {
