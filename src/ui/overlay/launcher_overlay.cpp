@@ -255,6 +255,10 @@ void LauncherDialog::LoadFromSettings() {
                    : 1 + std::clamp(rex::cvar::Query<int32_t>("show_fps_counter_detail"), 0, 2);
 
   tab_ = std::clamp(rex::cvar::Query<int32_t>("options_menu_tab"), 0, kTabCount - 1);
+
+  if (!options_.update_check_cvar.empty()) {
+    update_check_index_ = rex::cvar::Query<bool>(options_.update_check_cvar) ? 1 : 0;
+  }
 }
 
 void LauncherDialog::ApplyLive() {
@@ -395,6 +399,9 @@ void LauncherDialog::SaveForNextStart() {
   std::vector<std::string_view> live = {"monitor", "fullscreen", "fullscreen_mode",
                                         "fullscreen_refresh_rate"};
   live.insert(live.end(), kLiveCvars.begin(), kLiveCvars.end());
+  if (!options_.update_check_cvar.empty()) {
+    live.push_back(options_.update_check_cvar);
+  }
   rex::cvar::SaveConfigValues(options_.settings_path, live);
   toml::table table;
   try {
@@ -458,6 +465,9 @@ void LauncherDialog::SaveAll() {
       names.push_back("game_data_root");
     }
     names.insert(names.end(), kLiveCvars.begin(), kLiveCvars.end());
+    if (!options_.update_check_cvar.empty()) {
+      names.push_back(options_.update_check_cvar);
+    }
     rex::cvar::SaveConfigValues(options_.settings_path, names);
   }
   if (vsync_changed && window_) {
@@ -659,6 +669,28 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
   ImGui::TextUnformatted(options_.subtitle.c_str());
   ImGui::PopStyleColor();
+  // A newer release (launcher only): one line and a button that opens its page in the browser.
+  if (!options_.in_game && options_.update_notice) {
+    std::string version, url;
+    {
+      std::lock_guard lock(options_.update_notice->mutex);
+      version = options_.update_notice->version;
+      url = options_.update_notice->url;
+    }
+    if (!version.empty()) {
+      ImGui::Dummy(ImVec2(0, 2.0f * s));
+      ImGui::PushStyleColor(ImGuiCol_Text, kGood);
+      ImGui::AlignTextToFramePadding();
+      ImGui::TextUnformatted(fmt::format("Version {} is available.", version).c_str());
+      ImGui::PopStyleColor();
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Open the release page") && !url.empty()) {
+        if (!SDL_OpenURL(url.c_str())) {
+          REXLOG_WARN("Launcher: cannot open {}: {}", url, SDL_GetError());
+        }
+      }
+    }
+  }
   ImGui::Dummy(ImVec2(0, 8.0f * s));
 
   const float content_w = ImGui::GetContentRegionAvail().x;
@@ -847,6 +879,18 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
                    {"Detailed", "Also the GPU wait and GPU time breakdown (for testing)."}},
                   true, field_w)) {
       ApplyLive();
+    }
+
+    if (!options_.update_check_cvar.empty()) {
+      row_label("Check for updates", Applies::kRestart);
+      if (DrawCombo("##updatecheck", update_check_index_,
+                    {{"Off", "Never asks GitHub for a newer version."},
+                     {"On", "At start, the launcher asks GitHub once whether a newer version is "
+                            "out and shows a link to it. Nothing is downloaded."}},
+                    true, field_w)) {
+        rex::cvar::SetFlagByName(options_.update_check_cvar,
+                                 update_check_index_ ? "true" : "false");
+      }
     }
   } else if (tab_ == 1) {
     // Graphics.

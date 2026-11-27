@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,14 @@ namespace rex::ui {
 
 class LauncherDialog final : public ImGuiDialog {
  public:
+  // Filled in by the app's update check (any thread, possibly after the dialog is gone): when
+  // `version` is set the launcher shows one line with it and a button that opens `url` in the
+  // browser. Nothing is downloaded.
+  struct UpdateNotice {
+    std::mutex mutex;
+    std::string version;
+    std::string url;
+  };
   struct GameCheck {
     bool ok = false;
     std::string message;  // "Ready: ..." or what is wrong with the file
@@ -38,6 +47,11 @@ class LauncherDialog final : public ImGuiDialog {
     bool in_game = false;
     // Footer line for the in-game menu (e.g. that the game is paused).
     std::string in_game_note;
+    // Launcher only: a newer release, if the app's check found one.
+    std::shared_ptr<UpdateNotice> update_notice;
+    // A bool cvar that turns the app's update check on / off; shows a "Check for updates" row
+    // (Display tab) when set. Empty = no row (e.g. RecompLauncher updates the game itself).
+    std::string update_check_cvar;
   };
   using CheckGameCallback = std::function<GameCheck(const std::filesystem::path&)>;
   using PlayCallback = std::function<void(const std::filesystem::path& game_path)>;
@@ -98,6 +112,7 @@ class LauncherDialog final : public ImGuiDialog {
   int fps_index_ = 0;          // 0 off, 1 FPS, 2 FPS + frame time, 3 detailed
   int tab_ = 0;                // Display, Graphics, Audio, Controls
   int tab_request_ = -1;       // tab to select on the next frame (LB / RB, PgUp / PgDn)
+  int update_check_index_ = 1; // 0 off, 1 on (Options::update_check_cvar)
 
   bool pad_opened_ = false;
   bool first_frame_ = true;
