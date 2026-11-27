@@ -79,6 +79,11 @@ class Clock {
   // Sets the system time of the guest.
   static void SetGuestSystemTime(uint64_t system_time);
 
+  // Freezes the guest clock (guest ticks, mftb, guest system time) while paused: no guest time
+  // passes between pause and resume. Used to hold the game while a host menu is open.
+  static void SetGuestClockPaused(bool paused);
+  static bool guest_clock_paused();
+
   // Scales a time duration in milliseconds, from guest time.
   static uint32_t ScaleGuestDurationMillis(uint32_t guest_ms);
   // Scales a time duration in 100ns ticks like FILETIME, from guest time.

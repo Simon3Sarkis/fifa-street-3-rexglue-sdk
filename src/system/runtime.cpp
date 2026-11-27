@@ -263,10 +263,43 @@ X_STATUS Runtime::Setup(const rex::PPCImageInfo& image_info, RuntimeConfig confi
   return X_STATUS_SUCCESS;
 }
 
+void Runtime::SetGuestPaused(bool paused) {
+  if (paused == guest_paused_ || !kernel_state_) {
+    return;
+  }
+  guest_paused_ = paused;
+  if (paused) {
+    // Audio first: its worker finishes the guest callback it is in while the game still runs.
+    if (audio_system_) {
+      audio_system_->Pause();
+    }
+    system::XThread::SetGuestPaused(true);
+    chrono::Clock::SetGuestClockPaused(true);
+    pause_host_tick_ = chrono::Clock::QueryHostTickCount();
+    REXLOG_INFO("Guest paused (guest tick {})", chrono::Clock::QueryGuestTickCount());
+  } else {
+    const int parked = system::XThread::guest_parked_thread_count();
+    const uint64_t guest_tick = chrono::Clock::QueryGuestTickCount();
+    chrono::Clock::SetGuestClockPaused(false);
+    system::XThread::SetGuestPaused(false);
+    if (audio_system_) {
+      audio_system_->Resume();
+    }
+    REXLOG_INFO("Guest resumed after {:.2f} s: {} guest threads were parked, guest tick {}",
+                double(chrono::Clock::QueryHostTickCount() - pause_host_tick_) /
+                    double(chrono::Clock::QueryHostTickFrequency()),
+                parked, guest_tick);
+  }
+}
+
 void Runtime::Shutdown() {
   if (!instance_ && !setup_complete_ && !memory_) {
     return;
   }
+
+  // Closing while held (the window closed with a host menu open): let the guest run again so its
+  // threads reach their exit points and the audio worker can stop.
+  SetGuestPaused(false);
 
   if (instance_ == this) {
     instance_ = nullptr;

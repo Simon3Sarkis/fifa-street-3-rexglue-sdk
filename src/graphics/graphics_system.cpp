@@ -45,7 +45,7 @@
 
 REXCVAR_DEFINE_STRING(swap_post_effect, "none", "GPU", "Swap post effect: none, fxaa, fxaa_extreme")
     .allowed({"none", "fxaa", "fxaa_extreme"})
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(store_shaders, true, "GPU",
                     "Store shaders persistently and load them when loading games to avoid "
@@ -268,6 +268,14 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
     return X_STATUS_UNSUCCESSFUL;
   }
   command_processor_->SetDesiredSwapPostEffect(ParseSwapPostEffect(REXCVAR_GET(swap_post_effect)));
+  // The options menu (and input-script `set`) switch FXAA while the game runs; the command
+  // processor takes it at its next swap.
+  rex::cvar::RegisterChangeCallback("swap_post_effect", [this](std::string_view, std::string_view) {
+    if (command_processor_) {
+      command_processor_->SetDesiredSwapPostEffect(
+          ParseSwapPostEffect(REXCVAR_GET(swap_post_effect)));
+    }
+  });
 
   // Register GPU MMIO handlers
   // GPU registers are at 0x7FC80000-0x7FCFFFFF
@@ -319,6 +327,17 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
         uint32_t logged_divider = ~0u;
 #endif
         while (vsync_worker_running_) {
+          // The game is held (a host menu is open): no vblanks, and the schedule starts afresh
+          // on resume instead of catching up.
+          if (chrono::Clock::guest_clock_paused()) {
+            rex::thread::Sleep(std::chrono::milliseconds(2));
+            next_frame_time = chrono::Clock::QueryGuestTickCount() + vsync_interval_ticks;
+            next_frame_host_tick = chrono::Clock::QueryHostTickCount() + vsync_interval_host_ticks;
+#if REX_PLATFORM_WIN32
+            display_locked = false;
+#endif
+            continue;
+          }
 #if REX_PLATFORM_WIN32
           uint64_t display_last = 0;
           double display_period = 0.0;
@@ -463,6 +482,7 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
 
 void GraphicsSystem::Shutdown() {
   shutting_down_.store(true, std::memory_order_release);
+  rex::cvar::UnregisterChangeCallbacks("swap_post_effect");
 
   if (command_processor_) {
     command_processor_->Shutdown();

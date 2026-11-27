@@ -122,6 +122,12 @@ class Runtime {
   system::IAudioSystem* audio_system() const { return audio_system_.get(); }
   system::IInputSystem* input_system() const { return input_system_.get(); }
 
+  // Holds the game while a host menu is open: guest audio callbacks stop, every guest thread parks
+  // at its next kernel wait / delay / yield, and the guest clock (and with it vblank) stands still,
+  // so no guest time passes. Resume continues where it stopped. UI thread; no-op when unchanged.
+  void SetGuestPaused(bool paused);
+  bool guest_paused() const { return guest_paused_; }
+
   // FunctionDispatcher for guest function dispatch and interrupt execution
   runtime::FunctionDispatcher* function_dispatcher() const { return function_dispatcher_.get(); }
   // Export resolver - used for variable import resolution in guest memory
@@ -202,6 +208,8 @@ class Runtime {
   std::unique_ptr<system::KernelState> kernel_state_;
   std::unique_ptr<system::IGraphicsSystem> graphics_system_;
   std::unique_ptr<system::IAudioSystem> audio_system_;
+  bool guest_paused_ = false;
+  uint64_t pause_host_tick_ = 0;
   std::unique_ptr<system::IInputSystem> input_system_;
   std::unique_ptr<runtime::ExportResolver> export_resolver_;
 

@@ -24,6 +24,9 @@ class IAudioSystem {
   virtual ~IAudioSystem() = default;
   virtual X_STATUS Setup(KernelState* kernel_state) = 0;
   virtual void Shutdown() = 0;
+  // Stops / restarts the guest audio callbacks (Runtime::SetGuestPaused).
+  virtual void Pause() {}
+  virtual void Resume() {}
 };
 
 }  // namespace rex::system

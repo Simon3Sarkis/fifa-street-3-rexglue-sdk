@@ -323,7 +323,15 @@ class XThread : public XObject {
 
   // If the title is terminating and this is a running guest thread, self-exits
   // via Exit(0) and DOES NOT RETURN. Called from the kernel wait primitives.
+  // Also the pause point: while SetGuestPaused(true) holds, a guest thread that gets here waits
+  // until it is cleared (or the title terminates).
   static void CheckTitleTermination();
+
+  // Holds the guest: every guest thread parks at its next kernel wait / delay / yield. Used with
+  // Clock::SetGuestClockPaused by Runtime::SetGuestPaused.
+  static void SetGuestPaused(bool paused);
+  static bool guest_paused();
+  static int guest_parked_thread_count();
 
   static uint32_t GetLastError();
   static void SetLastError(uint32_t error_code);

@@ -13,6 +13,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -144,10 +145,53 @@ XThread* XThread::GetCurrentThread() {
   return thread;
 }
 
+namespace {
+// SetGuestPaused: guest threads that reach a kernel safe point wait here until resumed.
+std::atomic<bool> guest_paused_{false};
+std::mutex guest_pause_mutex_;
+std::condition_variable guest_pause_cv_;
+std::atomic<int> guest_parked_threads_{0};
+}  // namespace
+
+void XThread::SetGuestPaused(bool paused) {
+  {
+    std::lock_guard<std::mutex> lock(guest_pause_mutex_);
+    guest_paused_.store(paused, std::memory_order_release);
+  }
+  if (!paused) {
+    guest_pause_cv_.notify_all();
+  }
+}
+
+bool XThread::guest_paused() {
+  return guest_paused_.load(std::memory_order_acquire);
+}
+
+int XThread::guest_parked_thread_count() {
+  return guest_parked_threads_.load(std::memory_order_acquire);
+}
+
 void XThread::CheckTitleTermination() {
   XThread* self = GetBoundCurrentXThread();
-  if (self && self->is_guest_thread() && self->is_running() &&
-      self->kernel_state()->is_terminating_title()) {
+  if (!self || !self->is_guest_thread() || !self->is_running()) {
+    return;
+  }
+  // Paused: park at this safe point (no host locks held; the game's own locks stay with their
+  // owners, who are parked too) until resumed or the title ends.
+  if (guest_paused_.load(std::memory_order_acquire) &&
+      !self->kernel_state()->is_terminating_title()) {
+    guest_parked_threads_.fetch_add(1, std::memory_order_acq_rel);
+    {
+      std::unique_lock<std::mutex> lock(guest_pause_mutex_);
+      while (guest_paused_.load(std::memory_order_acquire) &&
+             !self->kernel_state()->is_terminating_title()) {
+        // Woken by SetGuestPaused(false); the timeout only re-checks for title termination.
+        guest_pause_cv_.wait_for(lock, std::chrono::milliseconds(50));
+      }
+    }
+    guest_parked_threads_.fetch_sub(1, std::memory_order_acq_rel);
+  }
+  if (self->kernel_state()->is_terminating_title()) {
     // Unwind cleanly at this safe point. Does not return.
     self->Exit(0);
   }

@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <mutex>
 
@@ -41,6 +42,8 @@ uint64_t last_guest_tick_count_ = 0;
 uint64_t last_host_tick_count_ = Clock::QueryHostTickCount();
 // Mutex to ensure last_host_tick_count_ and last_guest_tick_count_ are in sync
 std::mutex tick_mutex_;
+// SetGuestClockPaused: while set, host time passes without guest time.
+std::atomic<bool> guest_clock_paused_{false};
 
 void RecomputeGuestTickScalar() {
   // Create a rational number with numerator (first) and denominator (second)
@@ -77,6 +80,9 @@ uint64_t UpdateGuestClock() {
     uint64_t host_tick_delta =
         host_tick_count > last_host_tick_count_ ? host_tick_count - last_host_tick_count_ : 0;
     last_host_tick_count_ = host_tick_count;
+    if (guest_clock_paused_.load(std::memory_order_relaxed)) {
+      host_tick_delta = 0;
+    }
     uint64_t guest_tick_delta =
         host_tick_delta * guest_tick_ratio_.first / guest_tick_ratio_.second;
     last_guest_tick_count_ += guest_tick_delta;
@@ -183,6 +189,18 @@ void Clock::SetGuestSystemTime(uint64_t system_time) {
   // Query the filetime offset to calculate a new base time.
   auto guest_system_time_offset = QueryGuestSystemTimeOffset();
   guest_system_time_base_ = system_time - guest_system_time_offset;
+}
+
+void Clock::SetGuestClockPaused(bool paused) {
+  // Bring the guest clock up to date first: time before the pause counts, time during it doesn't.
+  UpdateGuestClock();
+  std::lock_guard<std::mutex> lock(tick_mutex_);
+  last_host_tick_count_ = Clock::QueryHostTickCount();
+  guest_clock_paused_.store(paused, std::memory_order_relaxed);
+}
+
+bool Clock::guest_clock_paused() {
+  return guest_clock_paused_.load(std::memory_order_relaxed);
 }
 
 uint32_t Clock::ScaleGuestDurationMillis(uint32_t guest_ms) {

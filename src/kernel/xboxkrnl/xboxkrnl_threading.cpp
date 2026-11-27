@@ -390,6 +390,7 @@ u32 KeDelayExecutionThread_entry(u32 processor_mode, u32 alertable, mapped_u64 i
 }
 
 u32 NtYieldExecution_entry() {
+  XThread::CheckTitleTermination();  // also the pause point (spin-waits yield here)
   XThread::CountGuestYield(0);
   rex::thread::MaybeYield();
   return X_STATUS_SUCCESS;
