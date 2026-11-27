@@ -65,6 +65,17 @@ REXCVAR_DEFINE_STRING(menu_chord, "rb+start", "Input",
                       "Controller chord that toggles the settings menu. Buttons joined by '+': "
                       "a, b, x, y, lb, rb, l3, r3, back, start, dpad_up, dpad_down, dpad_left, "
                       "dpad_right. Empty disables the chord.");
+
+REXCVAR_DEFINE_INT32(menu_chord_hold_ms, 80, "Input",
+                     "A menu-chord button pressed alone reaches the guest this many ms late, so a "
+                     "chord's buttons never reach it (Start would pause the game behind the "
+                     "menu). A tap shorter than this is still delivered. 0 = no hold-back")
+    .range(0, 500)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(input_ignore_held_after_menu, true, "Input",
+                    "After a host menu closes, buttons still held reach the guest only once "
+                    "released and pressed again")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(hid_rumble_enabled, true, "Input", "Enable controller vibration");
 REXCVAR_DEFINE_UINT32(hid_rumble_min_motor_speed, 0x1000, "Input",
                       "Minimum XInput motor speed forwarded to host controllers")
@@ -156,6 +167,96 @@ void InputSystem::SetActiveCallback(std::function<bool()> callback) {
   for (auto& driver : drivers_) {
     driver->set_is_active_callback(callback);
   }
+}
+
+void InputSystem::IgnoreButtonsHeldNow() {
+  for (auto& requested : ignore_held_requested_) {
+    requested.store(true, std::memory_order_release);
+  }
+}
+
+uint16_t InputSystem::FilterGuestButtons(uint32_t user_index, uint16_t physical,
+                                         uint16_t delivered, uint16_t chord_mask, bool active) {
+  if (user_index >= std::size(button_filters_)) {
+    return delivered;
+  }
+  ButtonFilter& f = button_filters_[user_index];
+  const uint64_t now = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch())
+                                    .count());
+  const uint16_t in = delivered;
+  auto Finish = [](ButtonFilter& f, uint16_t in, uint16_t out) {
+    if (out != f.last_out && in == f.last_in) {
+      ++f.packet_bias;
+    }
+    f.last_in = in;
+    f.last_out = out;
+    return out;
+  };
+  // What the player (or script) holds, whether or not a menu keeps it from the guest.
+  const uint16_t held = physical | delivered;
+
+  // Held when a menu closed: hidden until released.
+  if (REXCVAR_GET(input_ignore_held_after_menu)) {
+    if (ignore_held_requested_[user_index].exchange(false, std::memory_order_acq_rel) ||
+        (active && !f.was_active)) {
+      f.ignore_until_released |= held;
+    }
+    f.ignore_until_released &= held;
+    delivered &= ~f.ignore_until_released;
+  } else {
+    ignore_held_requested_[user_index].store(false, std::memory_order_relaxed);
+    f.ignore_until_released = 0;
+  }
+  f.was_active = active;
+
+  // The menu chord: its buttons never reach the guest. One pressed alone is held back for
+  // menu_chord_hold_ms in case the others join; a tap released meanwhile is delivered late.
+  const int32_t hold_ms = REXCVAR_GET(menu_chord_hold_ms);
+  if (!chord_mask || hold_ms <= 0) {
+    f.chord_suppress = false;
+    f.hold_start_ms = 0;
+    f.held_back = 0;
+    f.tap = 0;
+    return Finish(f, in, delivered);
+  }
+  const uint16_t chord_held = held & chord_mask;
+  if (f.chord_suppress) {
+    if (!chord_held) {
+      f.chord_suppress = false;
+    }
+    delivered &= ~chord_mask;
+  } else if (chord_held == chord_mask) {
+    f.chord_suppress = true;
+    f.hold_start_ms = 0;
+    f.held_back = 0;
+    f.tap = 0;
+    delivered &= ~chord_mask;
+  } else if (chord_held) {
+    if (!f.hold_start_ms) {
+      f.hold_start_ms = now;
+    }
+    if (now - f.hold_start_ms < uint64_t(hold_ms)) {
+      f.held_back |= chord_held & delivered;
+      delivered &= ~chord_mask;
+    }
+  } else {
+    if (f.hold_start_ms && now - f.hold_start_ms < uint64_t(hold_ms) && f.held_back) {
+      // Released before the hold ended: deliver the tap for a couple of frames.
+      f.tap = f.held_back;
+      f.tap_until_ms = now + 34;
+    }
+    f.hold_start_ms = 0;
+    f.held_back = 0;
+  }
+  if (f.tap) {
+    if (now < f.tap_until_ms && !f.chord_suppress) {
+      delivered |= f.tap;
+    } else {
+      f.tap = 0;
+    }
+  }
+  return Finish(f, in, delivered);
 }
 
 void InputSystem::SetMenuChordCallback(std::function<void()> callback) {
@@ -366,11 +467,13 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   }
 
   const uint16_t menu_chord_buttons = ChordMaskFromSpec(REXCVAR_GET(menu_chord));
+  const uint16_t physical_buttons = static_cast<uint16_t>(merged.gamepad.buttons);
   bool menu_chord_down =
       menu_chord_buttons != 0 &&
-      (static_cast<uint16_t>(merged.gamepad.buttons) & menu_chord_buttons) == menu_chord_buttons;
+      (physical_buttons & menu_chord_buttons) == menu_chord_buttons;
 
-  if (active_callback_ && !active_callback_()) {
+  const bool active = !active_callback_ || active_callback_();
+  if (!active) {
     std::memset(&merged.gamepad, 0, sizeof(merged.gamepad));
   }
 
@@ -388,6 +491,14 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
     menu_chord_callback_();
   }
   menu_chord_down_ = menu_chord_down;
+
+  merged.gamepad.buttons = FilterGuestButtons(
+      user_index, physical_buttons, static_cast<uint16_t>(merged.gamepad.buttons),
+      menu_chord_callback_ ? menu_chord_buttons : uint16_t(0), active);
+  if (user_index < std::size(button_filters_)) {
+    merged.packet_number =
+        static_cast<uint32_t>(merged.packet_number) + button_filters_[user_index].packet_bias;
+  }
 
   if (out_state) {
     *out_state = merged;

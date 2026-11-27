@@ -1,4 +1,6 @@
 #pragma once
+
+#include <atomic>
 /**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
@@ -41,6 +43,10 @@ class InputSystem : public system::IInputSystem {
   void AttachWindow(rex::ui::Window* window);
   void SetActiveCallback(std::function<bool()> callback);
   void SetMenuChordCallback(std::function<void()> callback);
+  /// Call when a host menu closes: every button held at that moment is kept from the guest until
+  /// it is released (per button), so the press that closed the menu doesn't reach the game.
+  /// Also done by itself whenever the active callback turns from false to true.
+  void IgnoreButtonsHeldNow();
   /// Timed test input merged into the guest pad (see input_script.h). Null turns it off.
   void SetScript(std::unique_ptr<InputScript> script) { script_ = std::move(script); }
   /// Hook for the script's `snap` command (no-op without a script).
@@ -79,6 +85,25 @@ class InputSystem : public system::IInputSystem {
   std::function<void()> menu_chord_callback_ = nullptr;
   bool menu_chord_down_ = false;
 
+  // Per guest user: keeping the menu chord's buttons and buttons held across a host menu away
+  // from the guest (FilterGuestButtons).
+  struct ButtonFilter {
+    bool chord_suppress = false;    // chord completed: its buttons stay hidden until all released
+    uint64_t hold_start_ms = 0;     // a chord button went down alone: held back since then
+    uint16_t held_back = 0;         // chord buttons held back meanwhile
+    uint64_t tap_until_ms = 0;      // released while held back: delivered until then
+    uint16_t tap = 0;
+    uint16_t ignore_until_released = 0;  // held when a menu closed
+    bool was_active = true;
+    // The guest may skip a state whose packet number didn't change: count our own changes.
+    uint16_t last_in = 0;
+    uint16_t last_out = 0;
+    uint32_t packet_bias = 0;
+  };
+  ButtonFilter button_filters_[4];
+  std::atomic<bool> ignore_held_requested_[4] = {};
+  uint16_t FilterGuestButtons(uint32_t user_index, uint16_t physical, uint16_t delivered,
+                              uint16_t chord_mask, bool active);
   std::unique_ptr<DeviceAssignment> assignment_;
   ActiveDeviceTracker active_devices_;
 
