@@ -94,6 +94,10 @@ add_library(tomlplusplus INTERFACE)
 target_include_directories(tomlplusplus SYSTEM INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tomlplusplus/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+# Floats as the shortest text that reads back exactly (std::to_chars): 0.2 is written "0.2", not
+# "0.20000000000000001" (toml++ turns charconv off for Clang, an old limitation; Clang with the MSVC
+# STL or libstdc++ 11+ has it). Same value for every user of the header-only library.
+target_compile_definitions(tomlplusplus INTERFACE TOML_FLOAT_CHARCONV=1)
 
 # simde - SIMD Everywhere (header-only, git submodule)
 add_library(simde INTERFACE)
