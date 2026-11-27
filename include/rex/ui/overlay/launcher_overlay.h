@@ -31,10 +31,13 @@ class LauncherDialog final : public ImGuiDialog {
     std::filesystem::path settings_path;  // the user's settings file; choices are saved there
     std::string picker_hint;              // shown when no game is set up yet
     // In-game options menu instead of the pre-runtime launcher: no disc image section, "Back to
-    // game" instead of Play (PlayCallback), "Quit game" (QuitCallback), B / Esc closes. Settings
-    // the running game can't change (game resolution, render scale, vsync) only go to the
-    // settings file, for the next start.
+    // game" instead of Play (PlayCallback), "Quit game" (QuitCallback), B / Esc / Start + Back
+    // closes. Settings the running game can't change (game resolution, render scale, vsync) only
+    // go to the settings file, for the next start; each row says whether it applies now or on
+    // restart.
     bool in_game = false;
+    // Footer line for the in-game menu (e.g. that the game is paused).
+    std::string in_game_note;
   };
   using CheckGameCallback = std::function<GameCheck(const std::filesystem::path&)>;
   using PlayCallback = std::function<void(const std::filesystem::path& game_path)>;
@@ -60,6 +63,9 @@ class LauncherDialog final : public ImGuiDialog {
   void OpenPicker();
   void PollPicker();
   void ApplyDisplay();
+  // The options that change while the game runs (upscaling filter, sharpening, texture
+  // filtering, FXAA, FPS counter): set their cvars now.
+  void ApplyLive();
   void SaveAll();
   void SaveForNextStart();
   void PollGamepad(ImGuiIO& io);
@@ -85,6 +91,13 @@ class LauncherDialog final : public ImGuiDialog {
   int resolution_index_ = 0;   // see kResolutions in the .cpp
   int scale_index_ = 0;        // render scale - 1 (1x..4x)
   int frame_rate_index_ = 0;   // 60 only
+  int upscale_index_ = 0;      // see kUpscalers in the .cpp (0 = bilinear, the original)
+  int sharpness_index_ = 3;    // see kSharpness in the .cpp
+  int aniso_index_ = 0;        // 0 = the game's own filtering, then 2x..16x
+  int fxaa_index_ = 0;         // 0 off, 1 FXAA, 2 FXAA (extreme)
+  int fps_index_ = 0;          // 0 off, 1 FPS, 2 FPS + frame time, 3 detailed
+  int tab_ = 0;                // Display, Graphics, Audio, Controls
+  int tab_request_ = -1;       // tab to select on the next frame (LB / RB, PgUp / PgDn)
 
   bool pad_opened_ = false;
   bool first_frame_ = true;
@@ -93,6 +106,9 @@ class LauncherDialog final : public ImGuiDialog {
   bool played_ = false;
   double shown_time_ = 0.0;
   bool pad_b_was_down_ = true;  // a B already held when the menu opens doesn't close it
+  bool pad_chord_was_down_ = true;  // same for Start + Back
+  bool pad_lb_was_down_ = true;
+  bool pad_rb_was_down_ = true;
   bool close_requested_ = false;
 };
 

@@ -28,6 +28,12 @@ REXCVAR_DEFINE_INT32(launcher_autoplay_ms, 0, "UI",
                      "shows (0 = off)")
     .range(0, 600000);
 
+REXCVAR_DEFINE_INT32(options_menu_tab, 0, "UI",
+                     "Options menu tab shown when it opens: 0 Display, 1 Graphics, 2 Audio, "
+                     "3 Controls (follows the last tab used)")
+    .range(0, 3)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 namespace rex::ui {
 
 namespace {
@@ -49,6 +55,58 @@ constexpr ResolutionPreset kResolutions[] = {
 constexpr int kMaxRenderScale = 4;
 
 const char* const kScreenModes[] = {"Windowed", "Borderless fullscreen", "Exclusive fullscreen"};
+
+// Upscaling filter: how the game's picture is fitted to the window (present_effect). Bilinear is
+// what the SDK always did, so it stays the default.
+struct Upscaler {
+  const char* label;
+  const char* tooltip;
+  const char* cvar;  // present_effect
+};
+constexpr Upscaler kUpscalers[] = {
+    {"Bilinear (original)", "A plain stretch to the window, as before.", "bilinear"},
+    {"AMD FSR 1", "Edge-aware upscaling (EASU) plus sharpening (RCAS). Best when the window is "
+                  "larger than the render resolution.", "fsr"},
+    {"AMD CAS", "Contrast-adaptive sharpening, with light upscaling.", "cas"},
+};
+
+// Sharpening for FSR 1 (RCAS reduction in stops, lower = sharper) and CAS (additional sharpness).
+// Level 4 is FSR's own default (0.2), level 1 CAS's (0).
+struct SharpnessLevel {
+  const char* label;
+  double fsr_reduction;
+  double cas_additional;
+};
+constexpr SharpnessLevel kSharpness[] = {
+    {"1 (softest)", 2.0, 0.0},
+    {"2", 1.0, 0.25},
+    {"3", 0.5, 0.5},
+    {"4", 0.2, 0.75},
+    {"5 (sharpest)", 0.0, 1.0},
+};
+constexpr int kFsrDefaultSharpness = 3;
+constexpr int kCasDefaultSharpness = 0;
+
+// Texture filtering: anisotropic_override (-1 = the game's own sampler setting).
+struct AnisoLevel {
+  const char* label;
+  int value;
+};
+constexpr AnisoLevel kAniso[] = {
+    {"Game default (original)", -1}, {"2x anisotropic", 2}, {"4x anisotropic", 3},
+    {"8x anisotropic", 4},           {"16x anisotropic", 5},
+};
+
+const char* const kFxaa[] = {"none", "fxaa", "fxaa_extreme"};
+
+const char* const kTabs[] = {"Display", "Graphics", "Audio", "Controls"};
+constexpr int kTabCount = int(std::size(kTabs));
+
+// The cvars LauncherDialog::ApplyLive sets; saved with the rest.
+const std::vector<std::string_view> kLiveCvars = {
+    "present_effect",       "present_fsr_sharpness_reduction", "present_cas_additional_sharpness",
+    "anisotropic_override", "swap_post_effect",                "show_fps_counter",
+    "show_fps_counter_detail"};
 
 // Colours (linear 0-1 RGBA).
 constexpr ImVec4 kBackdropTop{0.035f, 0.045f, 0.075f, 1.0f};
@@ -153,6 +211,71 @@ void LauncherDialog::LoadFromSettings() {
   }
   scale_index_ =
       std::clamp(rex::cvar::Query<int32_t>("draw_resolution_scale_x"), 1, kMaxRenderScale) - 1;
+
+  const std::string effect = rex::cvar::Query<std::string>("present_effect");
+  upscale_index_ = 0;
+  for (size_t i = 0; i < std::size(kUpscalers); ++i) {
+    if (effect == kUpscalers[i].cvar) {
+      upscale_index_ = int(i);
+    }
+  }
+  // The level nearest to the active filter's setting.
+  const bool cas = std::string_view(kUpscalers[upscale_index_].cvar) == "cas";
+  const double sharp = cas ? rex::cvar::Query<double>("present_cas_additional_sharpness")
+                           : rex::cvar::Query<double>("present_fsr_sharpness_reduction");
+  sharpness_index_ = cas ? kCasDefaultSharpness : kFsrDefaultSharpness;
+  double best = 1e9;
+  for (size_t i = 0; i < std::size(kSharpness); ++i) {
+    const double d =
+        std::abs((cas ? kSharpness[i].cas_additional : kSharpness[i].fsr_reduction) - sharp);
+    if (d < best - 1e-6) {
+      best = d;
+      sharpness_index_ = int(i);
+    }
+  }
+
+  const int aniso = rex::cvar::Query<int32_t>("anisotropic_override");
+  aniso_index_ = 0;
+  for (size_t i = 0; i < std::size(kAniso); ++i) {
+    if (aniso == kAniso[i].value) {
+      aniso_index_ = int(i);
+    }
+  }
+
+  const std::string fxaa = rex::cvar::Query<std::string>("swap_post_effect");
+  fxaa_index_ = 0;
+  for (size_t i = 0; i < std::size(kFxaa); ++i) {
+    if (fxaa == kFxaa[i]) {
+      fxaa_index_ = int(i);
+    }
+  }
+
+  fps_index_ = !rex::cvar::Query<bool>("show_fps_counter")
+                   ? 0
+                   : 1 + std::clamp(rex::cvar::Query<int32_t>("show_fps_counter_detail"), 0, 2);
+
+  tab_ = std::clamp(rex::cvar::Query<int32_t>("options_menu_tab"), 0, kTabCount - 1);
+}
+
+void LauncherDialog::ApplyLive() {
+  const auto& level = kSharpness[std::clamp(sharpness_index_, 0, int(std::size(kSharpness)) - 1)];
+  const std::string_view effect = kUpscalers[upscale_index_].cvar;
+  // Sharpening first, so the filter switch below already paints with it. Only the active
+  // filter's value changes; the other keeps its own setting.
+  if (effect == "fsr") {
+    rex::cvar::SetFlagByName("present_fsr_sharpness_reduction",
+                             fmt::format("{}", level.fsr_reduction));
+  } else if (effect == "cas") {
+    rex::cvar::SetFlagByName("present_cas_additional_sharpness",
+                             fmt::format("{}", level.cas_additional));
+  }
+  rex::cvar::SetFlagByName("present_effect", effect);
+  rex::cvar::SetFlagByName("anisotropic_override", std::to_string(kAniso[aniso_index_].value));
+  rex::cvar::SetFlagByName("swap_post_effect", kFxaa[fxaa_index_]);
+  if (fps_index_ > 0) {
+    rex::cvar::SetFlagByName("show_fps_counter_detail", std::to_string(fps_index_ - 1));
+  }
+  rex::cvar::SetFlagByName("show_fps_counter", fps_index_ > 0 ? "true" : "false");
 }
 
 void LauncherDialog::SetGame(const std::filesystem::path& path) {
@@ -269,8 +392,10 @@ void LauncherDialog::SaveForNextStart() {
   if (options_.settings_path.empty()) {
     return;
   }
-  rex::cvar::SaveConfigValues(options_.settings_path,
-                              {"monitor", "fullscreen", "fullscreen_mode", "fullscreen_refresh_rate"});
+  std::vector<std::string_view> live = {"monitor", "fullscreen", "fullscreen_mode",
+                                        "fullscreen_refresh_rate"};
+  live.insert(live.end(), kLiveCvars.begin(), kLiveCvars.end());
+  rex::cvar::SaveConfigValues(options_.settings_path, live);
   toml::table table;
   try {
     if (std::filesystem::exists(options_.settings_path)) {
@@ -332,6 +457,7 @@ void LauncherDialog::SaveAll() {
     if (!game_path_.empty()) {
       names.push_back("game_data_root");
     }
+    names.insert(names.end(), kLiveCvars.begin(), kLiveCvars.end());
     rex::cvar::SaveConfigValues(options_.settings_path, names);
   }
   if (vsync_changed && window_) {
@@ -378,6 +504,26 @@ void LauncherDialog::PollGamepad(ImGuiIO& io) {
     close_requested_ = true;
   }
   pad_b_was_down_ = b_down;
+  // Start + Back closes the in-game menu here too: while the game is paused it doesn't poll the
+  // controller, so the input system's own chord detection is idle.
+  const bool chord_down = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_START) &&
+                          SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_BACK);
+  if (options_.in_game && chord_down && !pad_chord_was_down_) {
+    close_requested_ = true;
+  }
+  pad_chord_was_down_ = chord_down;
+  // LB / RB switch tabs.
+  const bool lb_down = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+  const bool rb_down = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+  if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
+    if (lb_down && !pad_lb_was_down_) {
+      tab_request_ = (tab_ + kTabCount - 1) % kTabCount;
+    } else if (rb_down && !pad_rb_was_down_) {
+      tab_request_ = (tab_ + 1) % kTabCount;
+    }
+  }
+  pad_lb_was_down_ = lb_down;
+  pad_rb_was_down_ = rb_down;
   auto axis = [&](ImGuiKey negative, ImGuiKey positive, SDL_GamepadAxis a) {
     const float v = SDL_GetGamepadAxis(pad, a) / 32767.0f;
     constexpr float kDead = 0.35f;
@@ -516,7 +662,7 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   ImGui::Dummy(ImVec2(0, 8.0f * s));
 
   const float content_w = ImGui::GetContentRegionAvail().x;
-  const float label_w = 250.0f * s;
+  const float label_w = 290.0f * s;
   // SameLine / SetCursorPosX positions count from the window edge, padding included.
   const float field_x = ImGui::GetCursorStartPos().x + label_w;
   const float field_w = content_w - label_w;
@@ -530,10 +676,36 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
     ImGui::PopFont();
     ImGui::Separator();
   };
-  auto row_label = [&](const char* label) {
+  // In the game every row says when it takes effect: NOW (at once) or RESTART (the next time the
+  // game starts). The launcher applies everything at Play, so it shows no tags.
+  enum class Applies { kNow, kRestart, kNone };
+  auto row_label = [&](const char* label, Applies applies = Applies::kNone) {
+    const float row_y = ImGui::GetCursorPosY();
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(label);
+    if (options_.in_game && applies != Applies::kNone) {
+      ImGui::SameLine(ImGui::GetCursorStartPos().x + 192.0f * s);
+      ImGui::PushFont(font_semibold, 12.0f * s);
+      const bool now = applies == Applies::kNow;
+      ImGui::PushStyleColor(ImGuiCol_Text, now ? ImVec4(kGood.x, kGood.y, kGood.z, 0.85f)
+                                               : ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.85f));
+      // Centred on the row's text (the tag font is smaller).
+      ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ImGui::GetStyle().FramePadding.y + 1.0f * s);
+      ImGui::TextUnformatted(now ? "NOW" : "RESTART");
+      ImGui::PopStyleColor();
+      ImGui::PopFont();
+    }
     ImGui::SameLine(field_x);
+    ImGui::SetCursorPosY(row_y);  // the field lines up with the label, not the tag
+  };
+  auto note = [&](const char* text) {
+    ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + content_w);
+    ImGui::PushFont(nullptr, 16.0f * s);
+    ImGui::TextUnformatted(text);
+    ImGui::PopFont();
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
   };
 
   // Game (the launcher only: the running game keeps its disc).
@@ -578,9 +750,53 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   ImGui::PopStyleColor();
   }
 
-  // Display.
-  section("DISPLAY");
-  {
+  // Settings, one tab per area. The body has a fixed height so the panel doesn't jump between tabs.
+  if (ImGui::IsKeyPressed(ImGuiKey_PageUp, false)) {
+    tab_request_ = (tab_ + kTabCount - 1) % kTabCount;
+  } else if (ImGui::IsKeyPressed(ImGuiKey_PageDown, false)) {
+    tab_request_ = (tab_ + 1) % kTabCount;
+  }
+  ImGui::Dummy(ImVec2(0, 4.0f * s));
+  ImGui::PushStyleColor(ImGuiCol_Tab, kField);
+  ImGui::PushStyleColor(ImGuiCol_TabHovered, kFieldHover);
+  ImGui::PushStyleColor(ImGuiCol_TabSelected, ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.85f));
+  ImGui::PushStyleColor(ImGuiCol_TabSelectedOverline, kAccent);
+  ImGui::PushStyleColor(ImGuiCol_TabDimmed, kField);
+  ImGui::PushStyleColor(ImGuiCol_TabDimmedSelected, ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.85f));
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(22.0f * s, 9.0f * s));
+  ImGui::PushFont(font_semibold, 18.0f * s);
+  // The first frame opens on the remembered tab. A requested tab (first frame, LB / RB, PgUp /
+  // PgDn) is shown at once and kept requested until ImGui reports it selected (it shows the first
+  // tab on its first frame); otherwise tab_ follows ImGui (mouse clicks).
+  const int request = first_frame_ ? tab_ : tab_request_;
+  int imgui_selected = -1;
+  if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_FittingPolicyShrink)) {
+    for (int t = 0; t < kTabCount; ++t) {
+      const ImGuiTabItemFlags flags = request == t ? ImGuiTabItemFlags_SetSelected : 0;
+      if (ImGui::BeginTabItem(kTabs[t], nullptr, flags)) {
+        imgui_selected = t;
+        ImGui::EndTabItem();
+      }
+    }
+    ImGui::EndTabBar();
+  }
+  const int shown = request >= 0 ? request : (imgui_selected >= 0 ? imgui_selected : tab_);
+  tab_request_ = request >= 0 && imgui_selected != request ? request : -1;
+  if (shown != tab_) {
+    tab_ = shown;
+    REXCVAR_SET(options_menu_tab, shown);
+  }
+  ImGui::PopFont();
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor(6);
+
+  const float row_h = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y;
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+  ImGui::BeginChild("##tabbody", ImVec2(content_w, row_h * 7.0f + 8.0f * s),
+                    ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoScrollbar);
+  ImGui::Dummy(ImVec2(0, 4.0f * s));
+  if (tab_ == 0) {
+    // Display.
     std::vector<Choice> displays;
     for (size_t i = 0; i < displays_.size(); ++i) {
       const auto& d = displays_[i];
@@ -590,7 +806,7 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
       }
       displays.push_back({std::move(label), ""});
     }
-    row_label("Display");
+    row_label("Display", Applies::kNow);
     if (DrawCombo("##display", display_index_, displays, true, field_w)) {
       refresh_index_ = 0;
       ApplyDisplay();
@@ -603,7 +819,7 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
     modes[0].tooltip = "A window on the desktop. On Windows the desktop compositor can hold it below 60 FPS; fullscreen is smoother.";
     modes[1].tooltip = "Covers the screen without changing the display mode. Quick to switch.";
     modes[2].tooltip = "The game takes over the display; lets you pick the refresh rate.";
-    row_label("Screen mode");
+    row_label("Screen mode", Applies::kNow);
     if (DrawCombo("##screenmode", screen_mode_index_, modes, true, field_w)) {
       if (screen_mode_index_ != 2) {
         refresh_index_ = 0;
@@ -611,27 +827,34 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
       ApplyDisplay();
     }
 
-    row_label("Refresh rate");
+    row_label("Refresh rate", Applies::kNow);
     if (DrawCombo("##refresh", refresh_index_, RefreshChoices(), screen_mode_index_ == 2,
                   field_w)) {
       ApplyDisplay();
     }
 
-    row_label("Vsync");
+    row_label("Vsync", Applies::kRestart);
     DrawCombo("##vsync", vsync_index_,
               {{"Off", "Lowest latency; the picture may tear."},
                {"On", "No tearing; slightly more latency."}},
               true, field_w);
-  }
 
-  // Graphics.
-  section("GRAPHICS");
-  {
+    row_label("FPS counter", Applies::kNow);
+    if (DrawCombo("##fps", fps_index_,
+                  {{"Off (original)", "No counter (F2 toggles it too)."},
+                   {"FPS", "Frames per second, top right."},
+                   {"FPS + frame time", "Also the time of the last frame, in ms."},
+                   {"Detailed", "Also the GPU wait and GPU time breakdown (for testing)."}},
+                  true, field_w)) {
+      ApplyLive();
+    }
+  } else if (tab_ == 1) {
+    // Graphics.
     std::vector<Choice> resolutions;
     for (const auto& r : kResolutions) {
       resolutions.push_back({r.label, r.tooltip});
     }
-    row_label("Game resolution");
+    row_label("Game resolution", Applies::kRestart);
     DrawCombo("##resolution", resolution_index_, resolutions, true, field_w);
 
     const auto& base = kResolutions[resolution_index_];
@@ -644,14 +867,78 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
                                    : "Draws everything larger, then fits it to the screen: a "
                                      "sharper picture for more GPU work."});
     }
-    row_label("Render scale");
+    row_label("Render scale", Applies::kRestart);
     DrawCombo("##scale", scale_index_, scales, true, field_w);
 
-    row_label("Frame rate");
+    std::vector<Choice> upscalers;
+    for (const auto& u : kUpscalers) {
+      upscalers.push_back({u.label, u.tooltip});
+    }
+    row_label("Upscaling filter", Applies::kNow);
+    if (DrawCombo("##upscale", upscale_index_, upscalers, true, field_w)) {
+      // Each filter starts at its own default sharpness.
+      sharpness_index_ = std::string_view(kUpscalers[upscale_index_].cvar) == "cas"
+                             ? kCasDefaultSharpness
+                             : kFsrDefaultSharpness;
+      ApplyLive();
+    }
+
+    const std::string_view effect = kUpscalers[upscale_index_].cvar;
+    const int default_sharpness = effect == "cas" ? kCasDefaultSharpness : kFsrDefaultSharpness;
+    std::vector<Choice> sharpness;
+    for (int i = 0; i < int(std::size(kSharpness)); ++i) {
+      std::string label = kSharpness[i].label;
+      if (i == default_sharpness) {
+        label += effect == "cas" ? "  - CAS default" : "  - FSR default";
+      }
+      sharpness.push_back({std::move(label), ""});
+    }
+    if (effect == "bilinear") {
+      sharpness = {{"Only with FSR 1 or CAS", ""}};
+    }
+    row_label("Sharpening", Applies::kNow);
+    int sharpness_shown = effect == "bilinear" ? 0 : sharpness_index_;
+    if (DrawCombo("##sharpness", sharpness_shown, sharpness, effect != "bilinear", field_w) &&
+        effect != "bilinear") {
+      sharpness_index_ = sharpness_shown;
+      ApplyLive();
+    }
+
+    std::vector<Choice> aniso;
+    for (const auto& a : kAniso) {
+      aniso.push_back({a.label, a.value < 0 ? "Each texture filtered as the game asks."
+                                            : "Sharper ground and walls at shallow angles."});
+    }
+    row_label("Texture filtering", Applies::kNow);
+    if (DrawCombo("##aniso", aniso_index_, aniso, true, field_w)) {
+      ApplyLive();
+    }
+
+    row_label("Anti-aliasing", Applies::kNow);
+    if (DrawCombo("##fxaa", fxaa_index_,
+                  {{"Off (original)", "The game's own picture."},
+                   {"FXAA", "Smooths jagged edges, slightly softer picture."},
+                   {"FXAA (extreme)", "Stronger smoothing, softer still."}},
+                  true, field_w)) {
+      ApplyLive();
+    }
+
+    row_label("Frame rate", Applies::kNone);
     DrawCombo("##framerate", frame_rate_index_,
               {{"60 FPS (locked, as on the console)", "The game's speed is tied to 60 FPS."}},
               true, field_w);
+  } else if (tab_ == 2) {
+    // Audio.
+    note("No audio options here yet.");
+  } else {
+    // Controls.
+    note("Xbox-style controller, as on the console. Keyboard and mouse, and remapping, are "
+         "planned for 0.3.0.");
+    ImGui::Dummy(ImVec2(0, 6.0f * s));
+    note("Options menu: F1, Esc, or Start + Back on the controller.");
   }
+  ImGui::EndChild();
+  ImGui::PopStyleColor();
 
   // Buttons.
   ImGui::Dummy(ImVec2(0, 16.0f * s));
@@ -698,14 +985,16 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
   ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + content_w);
   if (options_.in_game) {
-    ImGui::TextUnformatted(
-        "Display and screen mode change now. Game resolution, render scale and vsync take effect the "
-        "next time the game starts. The game keeps running while this menu is open. Close: B, Esc, "
-        "F1 or Start + Back.");
+    const std::string footer = fmt::format(
+        "{}NOW: changes at once. RESTART: the next time the game starts. Tabs: LB / RB or "
+        "PgUp / PgDn. Close: B, Esc, F1 or Start + Back.",
+        options_.in_game_note.empty() ? std::string() : options_.in_game_note + " ");
+    ImGui::TextUnformatted(footer.c_str());
   } else {
     ImGui::TextUnformatted(
-        "Mouse, keyboard (arrows, Enter, Esc) or controller (D-pad, A, B). Settings are saved for "
-        "next time. In the game: F1, Esc or Start + Back for these options.");
+        "Mouse, keyboard (arrows, Enter, Esc, PgUp / PgDn for tabs) or controller (D-pad, A, B, "
+        "LB / RB for tabs). Settings are saved for next time. In the game: F1, Esc or Start + "
+        "Back for these options.");
   }
   ImGui::PopTextWrapPos();
   ImGui::PopStyleColor();
