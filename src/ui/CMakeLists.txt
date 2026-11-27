@@ -130,8 +130,13 @@ if(REXGLUE_FIDELITYFX_SOURCE_DIR AND EXISTS "${REXGLUE_FIDELITYFX_SOURCE_DIR}/sd
         "${REXGLUE_FIDELITYFX_SOURCE_DIR}/sdk/include"
         "${REXGLUE_FIDELITYFX_SOURCE_DIR}/ffx-api/include"
     )
-    target_compile_definitions(rexui PRIVATE REX_HAS_FIDELITYFX_SDK=1)
 endif()
+# The spatial presenter effects (CAS, FSR 1 EASU + RCAS) are the prebuilt shaders in
+# ui/shaders/{bytecode,vulkan_spirv} and need nothing from the AMD SDK, so they are always built;
+# only the temporal path (fsr2 / fsr3, REX_HAS_FIDELITYFX_RUNTIME) needs REXGLUE_ENABLE_FIDELITYFX.
+# PUBLIC: the macro changes the layout of classes in rex/ui/presenter.h, so every user of that
+# header must see the same value.
+target_compile_definitions(rexui PUBLIC REX_HAS_FIDELITYFX_SDK=1)
 
 set(REXUI_HAS_FIDELITYFX_RUNTIME OFF)
 if(TARGET amd_fidelityfx_vk)

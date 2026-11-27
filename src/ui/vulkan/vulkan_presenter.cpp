@@ -16,12 +16,16 @@
 #include <cstdint>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <utility>
 #include <vector>
 
 #include <rex/assert.h>
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
+#include <fmt/format.h>
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/platform.h>
@@ -49,6 +53,14 @@
 
 REXCVAR_DEFINE_BOOL(present_render_pass_clear, true, "UI/Presenter",
                     "Clear render pass during presentation");
+
+REXCVAR_DEFINE_INT32(present_capture_interval_ms, 0, "UI/Presenter",
+                     "Testing: every this many ms, save the presented frame (the picture after the "
+                     "upscaling filter, with the menus and overlays) as present_<ms>.bmp in "
+                     "input_script_snap_dir (or snaps next to the exe). Independent of the desktop "
+                     "(works with the screen locked). 0 = off")
+    .range(0, 600000)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_BOOL(vulkan_present_separate_queue, true, "UI/Vulkan",
                     "Present from a queue the GPU emulation does not submit to (a second graphics "
@@ -1465,6 +1477,10 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
   swapchain_create_info.imageExtent = image_extent;
   swapchain_create_info.imageArrayLayers = 1;
   swapchain_create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  if (REXCVAR_GET(present_capture_interval_ms) > 0 &&
+      (surface_capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+    swapchain_create_info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  }
   uint32_t swapchain_queue_family_indices[2];
   if (queue_family_index_graphics_compute != queue_family_index_present) {
     // Using concurrent sharing mode to avoid an explicit ownership transfer
@@ -2320,6 +2336,61 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
 
   dfn.vkCmdEndRenderPass(draw_command_buffer);
 
+  // present_capture_interval_ms (testing): copy this frame out of the swapchain image.
+  VkBuffer capture_buffer = VK_NULL_HANDLE;
+  VkDeviceMemory capture_memory = VK_NULL_HANDLE;
+  const VkExtent2D capture_extent = paint_context_.swapchain_extent;
+  const VkFormat capture_format = paint_context_.swapchain_render_pass_format;
+  if (const int32_t interval_ms = REXCVAR_GET(present_capture_interval_ms);
+      interval_ms > 0 && execute_ui_drawers &&
+      (capture_format == VK_FORMAT_B8G8R8A8_UNORM || capture_format == VK_FORMAT_B8G8R8A8_SRGB ||
+       capture_format == VK_FORMAT_R8G8B8A8_UNORM || capture_format == VK_FORMAT_R8G8B8A8_SRGB)) {
+    static auto next_capture = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= next_capture &&
+        util::CreateDedicatedAllocationBuffer(
+            vulkan_device_,
+            VkDeviceSize(4) * capture_extent.width * capture_extent.height,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT, util::MemoryPurpose::kReadback, capture_buffer,
+            capture_memory)) {
+      next_capture = now + std::chrono::milliseconds(interval_ms);
+      VkImageMemoryBarrier barrier = {};
+      barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+      barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+      barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+      barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+      barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+      barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      barrier.image = paint_context_.swapchain_images[swapchain_image_index];
+      barrier.subresourceRange = util::InitializeSubresourceRange();
+      dfn.vkCmdPipelineBarrier(draw_command_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                               &barrier);
+      VkBufferImageCopy copy = {};
+      copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      copy.imageSubresource.layerCount = 1;
+      copy.imageExtent = {capture_extent.width, capture_extent.height, 1};
+      dfn.vkCmdCopyImageToBuffer(draw_command_buffer, barrier.image,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, capture_buffer, 1, &copy);
+      VkBufferMemoryBarrier buffer_barrier = {};
+      buffer_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+      buffer_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      buffer_barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+      buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      buffer_barrier.buffer = capture_buffer;
+      buffer_barrier.size = VK_WHOLE_SIZE;
+      barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+      barrier.dstAccessMask = 0;
+      barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+      barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+      dfn.vkCmdPipelineBarrier(draw_command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
+                               0, nullptr, 1, &buffer_barrier, 1, &barrier);
+    }
+  }
+
   const auto timing_end_command_buffer_start = std::chrono::steady_clock::now();
   dfn.vkEndCommandBuffer(draw_command_buffer);
   const auto timing_end_command_buffer_end = std::chrono::steady_clock::now();
@@ -2423,6 +2494,58 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
     present_result = dfn.vkQueuePresentKHR(queue_acquisition.queue(), &present_info);
   }
   const auto timing_present_end = std::chrono::steady_clock::now();
+
+  if (capture_buffer != VK_NULL_HANDLE) {
+    const VkDevice device = vulkan_device_->device();
+    paint_context_.submission_tracker.AwaitSubmissionCompletion(
+        paint_context_.submission_tracker.GetCurrentSubmission() - 1);
+    void* mapping = nullptr;
+    if (dfn.vkMapMemory(device, capture_memory, 0, VK_WHOLE_SIZE, 0, &mapping) == VK_SUCCESS) {
+      const uint32_t w = capture_extent.width, h = capture_extent.height;
+      const bool bgra = capture_format == VK_FORMAT_B8G8R8A8_UNORM ||
+                        capture_format == VK_FORMAT_B8G8R8A8_SRGB;
+      std::filesystem::path dir = rex::cvar::Query<std::string>("input_script_snap_dir");
+      if (dir.empty()) {
+        dir = rex::filesystem::GetExecutableFolder() / "snaps";
+      }
+      std::error_code ec;
+      std::filesystem::create_directories(dir, ec);
+      static const auto capture_start = std::chrono::steady_clock::now();
+      const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - capture_start)
+                          .count();
+      const auto file = dir / fmt::format("present_{:06}.bmp", ms);
+      // 24-bit bottom-up BMP.
+      const uint32_t row = (w * 3 + 3) & ~3u;
+      uint8_t header[54] = {'B', 'M'};
+      auto put32 = [&](int at, uint32_t v) { std::memcpy(header + at, &v, 4); };
+      put32(2, 54 + row * h);
+      put32(10, 54);
+      put32(14, 40);
+      put32(18, w);
+      put32(22, h);
+      header[26] = 1;
+      header[28] = 24;
+      put32(34, row * h);
+      std::ofstream out(file, std::ios::binary);
+      out.write(reinterpret_cast<const char*>(header), sizeof(header));
+      std::vector<uint8_t> line(row, 0);
+      const uint8_t* pixels = static_cast<const uint8_t*>(mapping);
+      for (uint32_t y = 0; y < h; ++y) {
+        const uint8_t* src = pixels + size_t(h - 1 - y) * w * 4;
+        for (uint32_t x = 0; x < w; ++x) {
+          line[x * 3 + 0] = src[x * 4 + (bgra ? 0 : 2)];
+          line[x * 3 + 1] = src[x * 4 + 1];
+          line[x * 3 + 2] = src[x * 4 + (bgra ? 2 : 0)];
+        }
+        out.write(reinterpret_cast<const char*>(line.data()), row);
+      }
+      REXLOG_INFO("present capture -> {} ({}x{})", file.string(), w, h);
+      dfn.vkUnmapMemory(device, capture_memory);
+    }
+    dfn.vkDestroyBuffer(device, capture_buffer, nullptr);
+    dfn.vkFreeMemory(device, capture_memory, nullptr);
+  }
   AccumulateAndMaybeLogPresentTiming(
       execute_ui_drawers, ElapsedUs(timing_acquire_start, timing_acquire_end),
       ElapsedUs(timing_acquire_end, timing_submit_start),

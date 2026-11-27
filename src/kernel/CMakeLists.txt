@@ -67,3 +67,6 @@ list(TRANSFORM REXKERNEL_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 target_sources(rexruntime PRIVATE ${REXKERNEL_SOURCES})
 
 target_link_libraries(rexruntime PRIVATE o1heap rexcore rexfilesystem rexui rexaudio rexinput imgui)
+# rexui is linked PRIVATE; its REX_HAS_FIDELITYFX_SDK changes the layout of rex/ui/presenter.h
+# classes, so the GPU plugin and the host app that include that header must see it too.
+target_compile_definitions(rexruntime PUBLIC REX_HAS_FIDELITYFX_SDK=1)

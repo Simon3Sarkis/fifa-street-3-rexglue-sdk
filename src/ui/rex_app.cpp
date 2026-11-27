@@ -901,6 +901,16 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
           }
           update_guest_frame_stats_enabled();
         });
+    // Upscaling filter / sharpening from the options menu (or input-script `set`): rebuild the
+    // presenter's paint config on the UI thread.
+    for (const char* name : {"present_effect", "present_cas_additional_sharpness",
+                             "present_fsr_sharpness_reduction", "present_dither"}) {
+      rex::cvar::RegisterChangeCallback(name, [this, presenter](std::string_view, std::string_view) {
+        app_context().CallInUIThread([presenter]() {
+          presenter->ReloadGuestOutputPaintConfigFromCvars();
+        });
+      });
+    }
   }
   rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay",
                         [this, update_guest_frame_stats_enabled] {

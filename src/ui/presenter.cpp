@@ -75,27 +75,27 @@ REXCVAR_DEFINE_INT32(present_safe_area_y, 100, "UI/Presenter",
 REXCVAR_DEFINE_STRING(present_effect, "bilinear", "UI/Presenter",
                       "Guest output effect: bilinear, cas, fsr, fsr2, fsr3")
     .allowed({"bilinear", "cas", "fsr", "fsr2", "fsr3"})
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_DOUBLE(present_cas_additional_sharpness,
                       rex::ui::Presenter::GuestOutputPaintConfig::kCasAdditionalSharpnessDefault,
                       "UI/Presenter", "Additional CAS sharpness in [0, 1]")
     .range(rex::ui::Presenter::GuestOutputPaintConfig::kCasAdditionalSharpnessMin,
            rex::ui::Presenter::GuestOutputPaintConfig::kCasAdditionalSharpnessMax)
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_INT32(present_fsr_max_upsampling_passes,
                      rex::ui::Presenter::GuestOutputPaintConfig::kFsrMaxUpscalingPassesMax,
                      "UI/Presenter", "Maximum chained FSR EASU passes")
     .range(1, int32_t(rex::ui::Presenter::GuestOutputPaintConfig::kFsrMaxUpscalingPassesMax))
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_DOUBLE(present_fsr_sharpness_reduction,
                       rex::ui::Presenter::GuestOutputPaintConfig::kFsrSharpnessReductionDefault,
                       "UI/Presenter", "FSR RCAS sharpness reduction in stops")
     .range(rex::ui::Presenter::GuestOutputPaintConfig::kFsrSharpnessReductionMin,
            rex::ui::Presenter::GuestOutputPaintConfig::kFsrSharpnessReductionMax)
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_STRING(
     present_fsr_quality_mode, "auto", "UI/Presenter",
@@ -110,7 +110,7 @@ REXCVAR_DEFINE_STRING(present_effect, "bilinear", "UI/Presenter", "Guest output 
 
 REXCVAR_DEFINE_BOOL(present_dither, false, "UI/Presenter",
                     "Enable output dithering in the final present pass")
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(present_allow_overscan_cutoff, false, "UI/Presenter",
                     "Allow overscan cutoff based on safe area settings")
@@ -858,6 +858,10 @@ Presenter::GuestFrameStats Presenter::GetGuestFrameStats() const {
     stats.frame_time_ms = 1000.0 / stats.fps;
   }
   return stats;
+}
+
+void Presenter::ReloadGuestOutputPaintConfigFromCvars() {
+  SetGuestOutputPaintConfigFromUIThread(BuildGuestOutputPaintConfigFromCVar());
 }
 
 void Presenter::SetGuestOutputPaintConfigFromUIThread(const GuestOutputPaintConfig& new_config) {

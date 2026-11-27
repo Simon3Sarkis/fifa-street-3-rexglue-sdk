@@ -12,6 +12,14 @@
  */
 #include <rex/ui/overlay/fps_overlay.h>
 
+#include <rex/cvar.h>
+
+REXCVAR_DEFINE_INT32(show_fps_counter_detail, 2, "UI",
+                     "What the FPS counter shows: 0 = FPS, 1 = FPS and frame time, 2 = also the "
+                     "GPU wait / GPU time breakdown")
+    .range(0, 2)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 #include <algorithm>
 
 #include <imgui.h>
@@ -34,7 +42,15 @@ void FpsOverlayDialog::OnDraw(ImGuiIO& io) {
                        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings |
                        ImGuiWindowFlags_NoFocusOnAppearing |
                        ImGuiWindowFlags_AlwaysAutoResize)) {
-    if (stats.frame_count > 0 && stats.fps > 0.0) {
+    const int32_t detail = REXCVAR_GET(show_fps_counter_detail);
+    if (stats.frame_count > 0 && stats.fps > 0.0 && detail <= 0) {
+      ImGui::Text("%.0f FPS", stats.fps);
+    } else if (stats.frame_count > 0 && stats.fps > 0.0 && detail == 1) {
+      ImGui::Text("%.0f FPS", stats.fps);
+      ImGui::PushFont(nullptr, 14.0f);
+      ImGui::Text("%.2f ms", stats.frame_time_ms);
+      ImGui::PopFont();
+    } else if (stats.frame_count > 0 && stats.fps > 0.0) {
       ImGui::Text("%.0f FPS", stats.fps);
       ImGui::PushFont(nullptr, 14.0f);
       ImGui::Text("%.2f ms", stats.frame_time_ms);

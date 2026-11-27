@@ -432,6 +432,9 @@ class Presenter {
   }
   // For simplicity, may be called repeatedly even if no changes have been made.
   void SetGuestOutputPaintConfigFromUIThread(const GuestOutputPaintConfig& new_config);
+  // Re-reads present_effect / present_*_sharpness* / present_dither (the options menu changes them
+  // while the game runs). UI thread.
+  void ReloadGuestOutputPaintConfigFromCvars();
 
   void AddUIDrawerFromUIThread(UIDrawer* drawer, size_t z_order);
   void RemoveUIDrawerFromUIThread(UIDrawer* drawer);
