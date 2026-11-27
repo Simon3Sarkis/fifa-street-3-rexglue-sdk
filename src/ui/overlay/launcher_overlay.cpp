@@ -251,6 +251,9 @@ LauncherDialog::LauncherDialog(ImGuiDrawer* drawer, Window* window, Options opti
       play_(std::move(play)),
       quit_(std::move(quit)),
       picker_(std::make_shared<PickerState>()) {
+  if (!options_.display_font_path.empty() && drawer) {
+    display_font_ = drawer->LoadFontFile(options_.display_font_path);
+  }
   displays_ = EnumerateDisplays();
   if (displays_.empty()) {
     displays_.push_back({"Default display", 0, 0, 0.0f, {}});
@@ -751,6 +754,13 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   ImFont* font = drawer->ui_font();
   ImFont* font_semibold = drawer->ui_font_semibold() ? drawer->ui_font_semibold() : font;
   ImFont* font_bold = drawer->ui_font_bold() ? drawer->ui_font_bold() : font_semibold;
+  // The condensed display face for headings, tabs, row labels and buttons (upper case, as the
+  // game sets them); the bold UI font without it.
+  ImFont* font_display = display_font_ ? display_font_ : font_bold;
+  const bool condensed = display_font_ != nullptr;
+  auto caps = [condensed](const char* text) {
+    return condensed ? Upper(text) : std::string(text);
+  };
 
   // Backdrop.
   ImDrawList* bg = ImGui::GetBackgroundDrawList();
@@ -814,13 +824,14 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   // Heading: big, outlined, upper case, like the game's "GAME PAUSED".
   {
     const std::string title = Upper(options_.title);
-    const float size = 62.0f * s;
+    const float size = (condensed ? 96.0f : 62.0f) * s;
     const ImVec2 at = ImGui::GetCursorScreenPos();
-    const ImVec2 extent = font_bold->CalcTextSizeA(size, FLT_MAX, 0.0f, title.c_str());
+    const ImVec2 extent = font_display->CalcTextSizeA(size, FLT_MAX, 0.0f, title.c_str());
     // Over the panel's top-left edge, as the game sets its menu titles.
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRectFullScreen();
-    OutlinedText(dl, font_bold, size, ImVec2(at.x - 18.0f * s, at.y - 52.0f * s), title.c_str(),
+    const float lift = (condensed ? 74.0f : 56.0f) * s;
+    OutlinedText(dl, font_display, size, ImVec2(at.x - 18.0f * s, at.y - lift), title.c_str(),
                  3.2f * s);
     dl->PopClipRect();
     ImGui::Dummy(ImVec2(extent.x, std::max(1.0f, extent.y - 54.0f * s)));
@@ -860,7 +871,7 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
 
   auto section = [&](const char* name) {
     ImGui::Dummy(ImVec2(0, 6.0f * s));
-    ImGui::PushFont(font_semibold, 14.0f * s);
+    ImGui::PushFont(font_display, (condensed ? 20.0f : 14.0f) * s);
     ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
     ImGui::TextUnformatted(name);
     ImGui::PopStyleColor();
@@ -892,15 +903,15 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
       ImGui::PushStyleColor(ImGuiCol_Text, kTextLight);
     }
     ImGui::AlignTextToFramePadding();
-    ImGui::PushFont(font_semibold, 0.0f);
-    ImGui::TextUnformatted(label);
+    ImGui::PushFont(condensed ? font_display : font_semibold, condensed ? 27.0f * s : 0.0f);
+    ImGui::TextUnformatted(caps(label).c_str());
     ImGui::PopFont();
     if (hot) {
       ImGui::PopStyleColor();
     }
     if (options_.in_game && applies != Applies::kNone) {
       ImGui::SameLine(ImGui::GetCursorStartPos().x + 192.0f * s);
-      ImGui::PushFont(font_semibold, 12.0f * s);
+      ImGui::PushFont(font_display, (condensed ? 17.0f : 12.0f) * s);
       const bool now = applies == Applies::kNow;
       ImGui::PushStyleColor(ImGuiCol_Text, hot ? kTextLight
                                            : now ? ImVec4(kGood.x, kGood.y, kGood.z, 0.9f)
@@ -985,7 +996,7 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(22.0f * s, 9.0f * s));
   ImGui::PushStyleVar(ImGuiStyleVar_TabRounding, 16.0f * s);
   ImGui::PushStyleVar(ImGuiStyleVar_TabBarBorderSize, 0.0f);
-  ImGui::PushFont(font_bold, 18.0f * s);
+  ImGui::PushFont(font_display, (condensed ? 27.0f : 18.0f) * s);
   // The first frame opens on the remembered tab. A requested tab (first frame, LB / RB, PgUp /
   // PgDn) is shown at once and kept requested until ImGui reports it selected (it shows the first
   // tab on its first frame); otherwise tab_ follows ImGui (mouse clicks).
@@ -1187,7 +1198,7 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.34f, 0.26f, 0.19f, 0.95f));
   ImGui::PushStyleColor(ImGuiCol_Text, kTextLight);
   ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, button_h * 0.5f);
-  ImGui::PushFont(font_bold, 19.0f * s);
+  ImGui::PushFont(font_display, (condensed ? 28.0f : 19.0f) * s);
   if (ImGui::Button(options_.in_game ? "QUIT GAME" : "QUIT", ImVec2(quit_w, button_h)) &&
       !played_) {
     played_ = true;
@@ -1205,7 +1216,7 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   ImGui::PushStyleColor(ImGuiCol_ButtonActive, kAccentHover);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextLight);
   ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, button_h * 0.5f);
-  ImGui::PushFont(font_bold, 22.0f * s);
+  ImGui::PushFont(font_display, (condensed ? 33.0f : 22.0f) * s);
   bool play =
       ImGui::Button(options_.in_game ? "BACK TO GAME" : "PLAY", ImVec2(play_w, button_h));
   if (const int autoplay_ms = REXCVAR_GET(launcher_autoplay_ms); autoplay_ms > 0) {

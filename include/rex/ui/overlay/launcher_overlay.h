@@ -17,6 +17,8 @@
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/window.h>
 
+struct ImFont;
+
 namespace rex::ui {
 
 class LauncherDialog final : public ImGuiDialog {
@@ -52,6 +54,9 @@ class LauncherDialog final : public ImGuiDialog {
     // A bool cvar that turns the app's update check on / off; shows a "Check for updates" row
     // (Display tab) when set. Empty = no row (e.g. RecompLauncher updates the game itself).
     std::string update_check_cvar;
+    // A display face (condensed, like the game's menus) for the title, tabs, row labels and
+    // buttons; the built-in UI fonts when empty or missing.
+    std::filesystem::path display_font_path;
   };
   using CheckGameCallback = std::function<GameCheck(const std::filesystem::path&)>;
   using PlayCallback = std::function<void(const std::filesystem::path& game_path)>;
@@ -135,6 +140,7 @@ class LauncherDialog final : public ImGuiDialog {
   int row_counter_ = 0;
   int current_row_ = -1;
   int first_tab_row_ = 0;
+  ImFont* display_font_ = nullptr;
   int focus_frames_ = 3;  // options_menu_focus_row (testing) is applied over the first frames
 };
 

@@ -14,7 +14,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -53,6 +55,9 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
   // SetupFonts); same metrics as the plain fonts.
   ImFont* ui_font_on_light() const { return ui_font_on_light_; }
   ImFont* ui_font_semibold_on_light() const { return ui_font_semibold_on_light_; }
+  // A font file shipped with the app (e.g. a display face for menus), loaded once and kept.
+  // Nullptr when the file is missing or unreadable. Call outside a frame (UI thread).
+  ImFont* LoadFontFile(const std::filesystem::path& path);
 
   // Per-overlay styling, patched by the consumer in OnConfigureStyle.
   Style& style() { return style_; }
@@ -128,6 +133,7 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
   ImFont* ui_font_bold_ = nullptr;
   ImFont* ui_font_on_light_ = nullptr;
   ImFont* ui_font_semibold_on_light_ = nullptr;
+  std::map<std::filesystem::path, ImFont*> loaded_font_files_;
 
   // All currently-attached dialogs that get drawn.
   std::vector<ImGuiDialog*> dialogs_;

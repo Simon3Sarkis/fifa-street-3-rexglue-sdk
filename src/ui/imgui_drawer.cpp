@@ -346,6 +346,26 @@ std::optional<ImGuiKey> ImGuiDrawer::VirtualKeyToImGuiKey(VirtualKey vkey) {
   }
 }
 
+ImFont* ImGuiDrawer::LoadFontFile(const std::filesystem::path& path) {
+  if (auto it = loaded_font_files_.find(path); it != loaded_font_files_.end()) {
+    return it->second;
+  }
+  ImFont* font = nullptr;
+  std::error_code ec;
+  if (!path.empty() && std::filesystem::is_regular_file(path, ec)) {
+    ImFontConfig config;
+    config.OversampleH = 1;
+    config.OversampleV = 1;
+    config.PixelSnapH = false;
+    font = GetIO().Fonts->AddFontFromFileTTF(path.string().c_str(), 18.0f, &config);
+  }
+  if (!font) {
+    REXLOG_WARN("ImGuiDrawer: font {} not loaded", path.string());
+  }
+  loaded_font_files_[path] = font;
+  return font;
+}
+
 void ImGuiDrawer::SetupFonts() {
   ImGuiIO& io = GetIO();
   io.Fonts->Clear();
