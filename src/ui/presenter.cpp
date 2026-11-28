@@ -138,6 +138,7 @@ REXCVAR_DEFINE_BOOL(present_frame_pacing, true, "UI",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 // When the shown guest frame was acquired (steady clock, ns; 0 = none yet).
 static std::atomic<int64_t> g_shown_frame_since_ns{0};
+static std::atomic<bool> g_presents_every_refresh{false};
 
 // The display's refresh period in microseconds from the desktop compositor (Windows), 0 if unknown.
 static double DisplayRefreshPeriodUs() {
@@ -160,10 +161,10 @@ static int64_t PacingHoldNs() {
   if (!REXCVAR_GET(present_frame_pacing)) {
     return 0;
   }
-  // Only through the desktop compositor (borderless / windowed, FIFO presents every refresh);
-  // exclusive fullscreen presents when a frame arrives.
-  if (rex::cvar::Query<bool>("fullscreen") &&
-      rex::cvar::Query<std::string>("fullscreen_mode") == "exclusive") {
+  // Only where presents go out once per refresh (borderless / windowed through the compositor);
+  // exclusive fullscreen presents when a frame arrives. (No settings-registry reads here: this
+  // runs in the paint path, and a setting's change callback may wait on the presenter.)
+  if (!g_presents_every_refresh.load(std::memory_order_relaxed)) {
     return 0;
   }
   static double period_us = 0.0;
@@ -375,6 +376,10 @@ GuestOutputPaintConfig BuildGuestOutputPaintConfigFromCVar() {
 
 namespace rex {
 namespace ui {
+
+void SetPresentsEveryRefresh(bool every_refresh) {
+  g_presents_every_refresh.store(every_refresh, std::memory_order_relaxed);
+}
 
 void Presenter::FatalErrorHostGpuLossCallback([[maybe_unused]] bool is_responsible,
                                               [[maybe_unused]] bool statically_from_ui_thread) {

@@ -80,6 +80,9 @@ REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_fifo_relaxed, true, "UI/Vulkan",
 // Measured 2026-11-27 (FIFA Street 3, RTX 4090, 2560x1440 120 Hz, the same match each run):
 // borderless with immediate 38.5 FPS and mailbox 39.2 FPS, vkQueueSubmit blocked 15-16 ms a frame;
 // borderless with FIFO and exclusive fullscreen with immediate a locked 60, 0.03-0.06 ms.
+REXCVAR_DECLARE(bool, fullscreen);
+REXCVAR_DECLARE(std::string, fullscreen_mode);
+
 REXCVAR_DEFINE_BOOL(vulkan_composited_present_fifo, true, "UI/Vulkan",
                     "Windows: when the window goes through the desktop compositor (borderless or "
                     "windowed, not exclusive fullscreen), present with FIFO instead of immediate or "
@@ -1548,9 +1551,9 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
 #if REX_PLATFORM_WIN32
   composited_fifo = REXCVAR_GET(vulkan_composited_present_fifo) &&
                     !rex::thread::IsRunningUnderWine() &&
-                    !(rex::cvar::Query<bool>("fullscreen") &&
-                      rex::cvar::Query<std::string>("fullscreen_mode") == "exclusive");
+                    !(REXCVAR_GET(fullscreen) && REXCVAR_GET(fullscreen_mode) == "exclusive");
 #endif
+  rex::ui::SetPresentsEveryRefresh(composited_fifo);
   if (composited_fifo) {
     REXLOG_INFO("VulkanPresenter: borderless / windowed on Windows: FIFO presentation "
                 "(vulkan_composited_present_fifo)");

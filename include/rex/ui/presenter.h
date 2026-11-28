@@ -51,6 +51,10 @@
 namespace rex {
 namespace ui {
 
+// Set by the platform presenter when its swapchain presents once per display refresh (FIFO
+// through the desktop compositor): present_frame_pacing applies only then.
+void SetPresentsEveryRefresh(bool every_refresh);
+
 class Presenter;
 class Window;
 
