@@ -28,8 +28,16 @@ class LauncherDialog final : public ImGuiDialog {
   // browser. Nothing is downloaded.
   struct UpdateNotice {
     std::mutex mutex;
-    std::string version;
-    std::string url;
+    std::string version;  // a newer release's version ("" = none found)
+    std::string url;      // its page
+    // The Updates tab (all optional; set by the app's updater, read under the mutex).
+    enum class State { kIdle, kChecking, kLatest, kAvailable, kDownloading, kReady, kFailed, kManaged };
+    State state = State::kIdle;
+    std::string current;     // this program's version
+    float progress = 0.0f;   // kDownloading: 0..1
+    std::string message;     // kFailed: what went wrong; kManaged: who updates the game instead
+    bool can_install = false;  // the newer release has a download this program can install
+    std::function<void()> check, install, restart;  // run by the buttons (never under the mutex)
   };
   struct GameCheck {
     bool ok = false;
@@ -78,6 +86,8 @@ class LauncherDialog final : public ImGuiDialog {
     std::string tooltip;
   };
 
+  // Display, Graphics, and Updates when the app has an updater (Options::update_notice).
+  int TabCount() const { return options_.update_notice ? 3 : 2; }
   void LoadFromSettings();
   void SetGame(const std::filesystem::path& path);
   void OpenPicker(bool folder);  // a disc image file, or an extracted game folder

@@ -24,6 +24,11 @@
 #include <rex/ui/presenter.h>
 #include <rex/ui/window.h>
 
+#if REX_PLATFORM_WIN32
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
+#endif
+
 #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
 #include <ffx_api/ffx_api.h>
 #include <ffx_api/ffx_upscale.h>
@@ -116,8 +121,71 @@ REXCVAR_DEFINE_BOOL(present_allow_overscan_cutoff, false, "UI/Presenter",
                     "Allow overscan cutoff based on safe area settings")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_BOOL(present_cadence_log, false, "UI",
+                    "Log how many presents (display refreshes, with FIFO) each new guest frame "
+                    "stayed on screen, every 600 new frames: all 2s on a 120 Hz display at 60 FPS "
+                    "is even pacing, a mix of 1s and 3s is the judder")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload)
+    .debug_only();
+// Set when a paint acquired a new guest frame (present_cadence_log).
+static std::atomic<bool> g_cadence_new_guest_frame{false};
+
+REXCVAR_DEFINE_BOOL(present_frame_pacing, true, "UI",
+                    "Even frame pacing on displays faster than the game (e.g. 60 FPS on 120 Hz with "
+                    "FIFO presentation): a new guest frame replaces the shown one only after that "
+                    "has been up for its whole share of refreshes, so every frame stays on screen "
+                    "the same number of refreshes, like an external 60 FPS limiter")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+// When the shown guest frame was acquired (steady clock, ns; 0 = none yet).
+static std::atomic<int64_t> g_shown_frame_since_ns{0};
+
+// The display's refresh period in microseconds from the desktop compositor (Windows), 0 if unknown.
+static double DisplayRefreshPeriodUs() {
+#if REX_PLATFORM_WIN32
+  DWM_TIMING_INFO info = {};
+  info.cbSize = sizeof(info);
+  LARGE_INTEGER frequency;
+  if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &info)) && info.qpcRefreshPeriod &&
+      QueryPerformanceFrequency(&frequency) && frequency.QuadPart) {
+    return double(info.qpcRefreshPeriod) * 1e6 / double(frequency.QuadPart);
+  }
+#endif
+  return 0.0;
+}
+
+// How long the shown guest frame must stay up before a new one may replace it (0 = no pacing):
+// on a display at a whole multiple of 60 Hz, N refreshes per frame, minus half a refresh of
+// tolerance so a frame that is on time is never held one refresh too long.
+static int64_t PacingHoldNs() {
+  if (!REXCVAR_GET(present_frame_pacing)) {
+    return 0;
+  }
+  // Only through the desktop compositor (borderless / windowed, FIFO presents every refresh);
+  // exclusive fullscreen presents when a frame arrives.
+  if (rex::cvar::Query<bool>("fullscreen") &&
+      rex::cvar::Query<std::string>("fullscreen_mode") == "exclusive") {
+    return 0;
+  }
+  static double period_us = 0.0;
+  static auto last_query = std::chrono::steady_clock::time_point();
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last_query > std::chrono::seconds(1)) {  // the compositor's period changes rarely
+    period_us = DisplayRefreshPeriodUs();
+    last_query = now;
+  }
+  if (period_us < 2500.0 || period_us > 12000.0) {
+    return 0;
+  }
+  const double n = std::round(16683.0 / period_us);
+  if (n < 2.0 || std::abs(n * period_us - 16683.0) > 0.03 * 16683.0) {
+    return 0;
+  }
+  return int64_t((n - 0.5) * period_us * 1000.0);
+}
+
 namespace {
 using GuestOutputPaintConfig = rex::ui::Presenter::GuestOutputPaintConfig;
+
 
 GuestOutputPaintConfig::Effect ParsePresentEffect(const std::string& effect_name) {
   std::string lowered = effect_name;
@@ -1043,6 +1111,17 @@ std::unique_lock<std::mutex> Presenter::ConsumeGuestOutput(
   // Desired ready = current ready (changed only by the producer).
   uint32_t desired_acquired_and_ready =
       (old_acquired_and_ready & ~uint32_t(3)) | (old_acquired_and_ready >> 2);
+  // present_frame_pacing: keep the shown frame until it has been up for its share of refreshes.
+  const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+  if (desired_acquired_and_ready != old_acquired_and_ready) {
+    const int64_t hold_ns = PacingHoldNs();
+    const int64_t since = g_shown_frame_since_ns.load(std::memory_order_relaxed);
+    if (hold_ns && since && now_ns - since < hold_ns && now_ns - since >= 0) {
+      desired_acquired_and_ready = old_acquired_and_ready;
+    }
+  }
   // Either the same image as during the last consumption, or a new one, is
   // satisfying. However, if it's new, using memory_order_acq_rel to acquire the
   // new ready image (to make it acquired) and to release the old acquired image
@@ -1055,7 +1134,9 @@ std::unique_lock<std::mutex> Presenter::ConsumeGuestOutput(
         (old_acquired_and_ready & ~uint32_t(3)) | (old_acquired_and_ready >> 2);
   }
   if (old_acquired_and_ready != desired_acquired_and_ready) {
+    g_shown_frame_since_ns.store(now_ns, std::memory_order_relaxed);
     guest_output_mailbox_producer_wait_condition_.notify_all();
+    g_cadence_new_guest_frame.store(true, std::memory_order_relaxed);
   }
   uint32_t mailbox_index = desired_acquired_and_ready & 3;
   // Give the current acquired image to the caller, or UINT32_MAX if it's
@@ -1726,6 +1807,27 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
   assert_false(execute_ui_drawers && !is_in_ui_thread_paint_);
   assert_true(surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable);
   PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
+  if (REXCVAR_GET(present_cadence_log) &&
+      (result == PaintResult::kPresented || result == PaintResult::kPresentedSuboptimal)) {
+    // Each present is one display refresh with FIFO: count them per guest frame.
+    static uint32_t presents_this_frame = 0;
+    static uint32_t histogram[6] = {};
+    static uint32_t frames = 0;
+    ++presents_this_frame;
+    if (g_cadence_new_guest_frame.exchange(false, std::memory_order_relaxed)) {
+      if (frames) {  // the previous frame's count ends here (this present shows the new one)
+        ++histogram[std::min<uint32_t>(presents_this_frame - 1, 5)];
+      }
+      presents_this_frame = 1;
+      if (++frames > 600) {
+        REXLOG_INFO("[present cadence] refreshes per guest frame over 600 frames: 1:{} 2:{} 3:{} "
+                    "4:{} 5+:{}",
+                    histogram[1], histogram[2], histogram[3], histogram[4], histogram[5]);
+        std::fill(std::begin(histogram), std::end(histogram), 0u);
+        frames = 1;
+      }
+    }
+  }
   switch (result) {
     case PaintResult::kPresented:
       surface_paint_connection_was_optimal_at_successful_paint_ = true;

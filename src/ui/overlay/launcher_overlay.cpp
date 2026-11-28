@@ -107,8 +107,7 @@ constexpr AnisoLevel kAniso[] = {
 
 const char* const kFxaa[] = {"none", "fxaa", "fxaa_extreme"};
 
-const char* const kTabs[] = {"Display", "Graphics", "Audio", "Controls"};
-constexpr int kTabCount = int(std::size(kTabs));
+const char* const kTabs[] = {"Display", "Graphics", "Updates"};
 
 // The cvars LauncherDialog::ApplyLive sets; saved with the rest.
 const std::vector<std::string_view> kLiveCvars = {
@@ -358,7 +357,7 @@ void LauncherDialog::LoadFromSettings() {
                    ? 0
                    : 1 + std::clamp(rex::cvar::Query<int32_t>("show_fps_counter_detail"), 0, 2);
 
-  tab_ = std::clamp(rex::cvar::Query<int32_t>("options_menu_tab"), 0, kTabCount - 1);
+  tab_ = std::clamp(rex::cvar::Query<int32_t>("options_menu_tab"), 0, TabCount() - 1);
 
   if (!options_.update_check_cvar.empty()) {
     update_check_index_ = rex::cvar::Query<bool>(options_.update_check_cvar) ? 1 : 0;
@@ -638,9 +637,9 @@ void LauncherDialog::PollGamepad(ImGuiIO& io) {
   const bool rb_down = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
   if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
     if (lb_down && !pad_lb_was_down_) {
-      tab_request_ = (tab_ + kTabCount - 1) % kTabCount;
+      tab_request_ = (tab_ + TabCount() - 1) % TabCount();
     } else if (rb_down && !pad_rb_was_down_) {
-      tab_request_ = (tab_ + 1) % kTabCount;
+      tab_request_ = (tab_ + 1) % TabCount();
     }
   }
   pad_lb_was_down_ = lb_down;
@@ -674,9 +673,28 @@ bool LauncherDialog::DrawCombo(const char* id, int& index, const std::vector<Cho
   const bool open = ImGui::BeginCombo(id, preview, ImGuiComboFlags_HeightLarge);
   ImGui::PopStyleVar();
   // The row's label shows the game's red pill while its field is hovered or focused.
-  if (current_row_ >= 0 &&
-      (ImGui::IsItemFocused() || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))) {
+  // One highlight at a time: the focused row while the keyboard / controller is in use, the row
+  // under the mouse while the mouse is (a resting pointer no longer competes with the focus).
+  if (current_row_ >= 0 && (ImGui::GetIO().NavVisible
+                                ? ImGui::IsItemFocused()
+                                : ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))) {
     hot_row_next_ = current_row_;
+  }
+  // Left / right change the value at once, as in the game's own menus (A opens the list).
+  if (!open && enabled && choices.size() > 1 && ImGui::IsItemFocused() &&
+      ImGui::GetIO().NavVisible) {
+    const bool left = ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true) ||
+                      ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft, true) ||
+                      ImGui::IsKeyPressed(ImGuiKey_GamepadLStickLeft, true);
+    const bool right = ImGui::IsKeyPressed(ImGuiKey_RightArrow, true) ||
+                       ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight, true) ||
+                       ImGui::IsKeyPressed(ImGuiKey_GamepadLStickRight, true);
+    const int step = right ? 1 : (left ? -1 : 0);
+    const int next = std::clamp(index + step, 0, int(choices.size()) - 1);
+    if (next != index) {
+      index = next;
+      changed = true;
+    }
   }
   if (open) {
     for (int i = 0; i < int(choices.size()); ++i) {
@@ -862,10 +880,8 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
       ImGui::TextUnformatted(fmt::format("Version {} is available.", version).c_str());
       ImGui::PopStyleColor();
       ImGui::SameLine();
-      if (ImGui::SmallButton("Open the release page") && !url.empty()) {
-        if (!SDL_OpenURL(url.c_str())) {
-          REXLOG_WARN("Launcher: cannot open {}: {}", url, SDL_GetError());
-        }
+      if (ImGui::SmallButton("Updates")) {
+        tab_request_ = 2;
       }
     }
   }
@@ -999,9 +1015,9 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
 
   // Settings, one tab per area. The body has a fixed height so the panel doesn't jump between tabs.
   if (ImGui::IsKeyPressed(ImGuiKey_PageUp, false)) {
-    tab_request_ = (tab_ + kTabCount - 1) % kTabCount;
+    tab_request_ = (tab_ + TabCount() - 1) % TabCount();
   } else if (ImGui::IsKeyPressed(ImGuiKey_PageDown, false)) {
-    tab_request_ = (tab_ + 1) % kTabCount;
+    tab_request_ = (tab_ + 1) % TabCount();
   }
   ImGui::Dummy(ImVec2(0, 4.0f * s));
   ImGui::PushStyleColor(ImGuiCol_Tab, kInk);
@@ -1021,7 +1037,7 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
   const int request = first_frame_ ? tab_ : tab_request_;
   int imgui_selected = -1;
   if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_FittingPolicyShrink)) {
-    for (int t = 0; t < kTabCount; ++t) {
+    for (int t = 0; t < TabCount(); ++t) {
       const ImGuiTabItemFlags flags = request == t ? ImGuiTabItemFlags_SetSelected : 0;
       const std::string tab_label = Upper(kTabs[t]) + "###tab" + std::to_string(t);
       if (ImGui::BeginTabItem(tab_label.c_str(), nullptr, flags)) {
@@ -1101,17 +1117,6 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
       ApplyLive();
     }
 
-    if (!options_.update_check_cvar.empty()) {
-      row_label("Check for updates", Applies::kRestart);
-      if (DrawCombo("##updatecheck", update_check_index_,
-                    {{"Off", "Never asks GitHub for a newer version."},
-                     {"On", "At start, the launcher asks GitHub once whether a newer version is "
-                            "out and shows a link to it. Nothing is downloaded."}},
-                    true, field_w)) {
-        rex::cvar::SetFlagByName(options_.update_check_cvar,
-                                 update_check_index_ ? "true" : "false");
-      }
-    }
   } else if (tab_ == 1) {
     // Graphics.
     std::vector<Choice> resolutions;
@@ -1191,15 +1196,135 @@ void LauncherDialog::OnDraw(ImGuiIO& io) {
     DrawCombo("##framerate", frame_rate_index_,
               {{"60 FPS (locked, as on the console)", "The game's speed is tied to 60 FPS."}},
               true, field_w);
-  } else if (tab_ == 2) {
-    // Audio.
-    note("No audio options here yet.");
-  } else {
-    // Controls.
-    note("Xbox-style controller, as on the console. Keyboard and mouse, and remapping, are "
-         "planned for 0.3.0.");
-    ImGui::Dummy(ImVec2(0, 6.0f * s));
-    note("Options menu: F1, Esc, or Start + Back on the controller.");
+  } else if (options_.update_notice) {
+    // Updates: what this is, what's newest, and the choice to install it.
+    using UpdateState = UpdateNotice::State;
+    UpdateState state;
+    std::string current, latest, url, message;
+    float progress;
+    bool can_install;
+    std::function<void()> do_check, do_install, do_restart;
+    {
+      std::lock_guard lock(options_.update_notice->mutex);
+      state = options_.update_notice->state;
+      current = options_.update_notice->current;
+      latest = options_.update_notice->version;
+      url = options_.update_notice->url;
+      message = options_.update_notice->message;
+      progress = options_.update_notice->progress;
+      can_install = options_.update_notice->can_install;
+      do_check = options_.update_notice->check;
+      do_install = options_.update_notice->install;
+      do_restart = options_.update_notice->restart;
+    }
+    // A button in a row's field: the row shows the game's red pill while it is focused / hovered.
+    auto row_button = [&](const char* label, bool primary, float width) {
+      if (primary) {
+        ImGui::PushStyleColor(ImGuiCol_Button, kAccent);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAccentHover);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, kAccentHover);
+        ImGui::PushStyleColor(ImGuiCol_Text, kTextLight);
+      }
+      const bool pressed = ImGui::Button(label, ImVec2(width, 0));
+      if (primary) {
+        ImGui::PopStyleColor(4);
+      }
+      if (ImGui::GetIO().NavVisible ? ImGui::IsItemFocused() : ImGui::IsItemHovered()) {
+        hot_row_next_ = current_row_;
+      }
+      return pressed;
+    };
+
+    row_label("Version");
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(current.empty() ? "Development build" : current.c_str());
+
+    row_label("Status");
+    ImGui::AlignTextToFramePadding();
+    ImVec4 status_color = kText;
+    std::string status;
+    switch (state) {
+      case UpdateState::kIdle:
+        status = "Not checked yet.";
+        break;
+      case UpdateState::kChecking:
+        status = "Checking...";
+        break;
+      case UpdateState::kLatest:
+        status = "Up to date.";
+        status_color = kGood;
+        break;
+      case UpdateState::kAvailable:
+        status = fmt::format("Version {} is available.", latest);
+        status_color = kGood;
+        break;
+      case UpdateState::kDownloading:
+        status = fmt::format("Downloading and installing {}: {}%", latest, int(progress * 100.0f));
+        break;
+      case UpdateState::kReady:
+        status = fmt::format("Version {} is installed. Restart to use it.", latest);
+        status_color = kGood;
+        break;
+      case UpdateState::kFailed:
+        status = message.empty() ? std::string("The update failed.") : message;
+        status_color = kBad;
+        break;
+      case UpdateState::kManaged:
+        status = message;
+        break;
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, status_color);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + field_w);
+    ImGui::TextUnformatted(status.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+
+    if (state != UpdateState::kManaged) {
+      if (!options_.update_check_cvar.empty()) {
+        row_label("Check at start");
+        if (DrawCombo("##updatecheck", update_check_index_,
+                      {{"Off", "Checks only when you press Check now."},
+                       {"On", "Asks GitHub once at each start whether a newer version is out. "
+                              "Nothing is downloaded until you press Update."}},
+                      true, field_w)) {
+          rex::cvar::SetFlagByName(options_.update_check_cvar,
+                                   update_check_index_ ? "true" : "false");
+        }
+      }
+      const float button_w = (field_w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+      row_label("Update");
+      if (state == UpdateState::kReady) {
+        if (row_button("Restart now", true, field_w) && do_restart) {
+          do_restart();
+        }
+      } else {
+        const bool busy = state == UpdateState::kChecking || state == UpdateState::kDownloading;
+        ImGui::BeginDisabled(busy || !do_check);
+        if (row_button("Check now", false, button_w) && do_check) {
+          do_check();
+        }
+        ImGui::EndDisabled();
+        const bool offer = (state == UpdateState::kAvailable || state == UpdateState::kFailed) &&
+                           can_install && !latest.empty();
+        if (offer) {
+          ImGui::SameLine();
+          if (row_button(fmt::format("Update to {}", latest).c_str(), true, button_w) &&
+              do_install) {
+            do_install();
+          }
+        } else if (state == UpdateState::kAvailable && !url.empty()) {
+          ImGui::SameLine();
+          if (row_button("Open the release page", false, button_w)) {
+            if (!SDL_OpenURL(url.c_str())) {
+              REXLOG_WARN("Launcher: cannot open {}: {}", url, SDL_GetError());
+            }
+          }
+        }
+      }
+      ImGui::Dummy(ImVec2(0, 4.0f * s));
+      note("Update downloads the new version from GitHub and installs it over the program. Your "
+           "settings, saves and the game files are kept.");
+    }
   }
   ImGui::EndChild();
   ImGui::PopStyleColor();
